@@ -1,21 +1,22 @@
+from ups_invoice_parser import UpsInvNormalizer  # Your existing normalizer class
+from ups_invoice_parser import UpsCustomerMatcher 
 from pathlib import Path
-from ups_invoice_parser import UpsInvNormalizer
 
-# Step 1: Gather all invoice files
+# Get normalized data
 base_path = Path(__file__).resolve().parent
 invoice_folder = base_path / "data/raw_invoices"
 file_list = list(invoice_folder.glob("*.csv"))
-
-# Step 2: Create the normalizer instance
 normalizer = UpsInvNormalizer(file_list)
-
-
-# Step 3: Run normalization steps
 normalizer.load_invoices()
 normalizer.merge_invoices()
 normalizer.standardize_invoices()
+normalized_df = normalizer.get_normalized_data()
 
-# Step 4: Get and inspect the result
-df = normalizer.get_normalized_data()
-print(df.head())  # Print top 5 rows
-print(df.columns.tolist())  # Print all column names
+# Create matcher
+matcher = UpsCustomerMatcher(normalized_df)
+matcher.match_customers()
+matched_df = matcher.get_matched_data()
+
+# Save or inspect
+matched_df.to_excel("matched_output.xlsx", index=False)
+print("✅ Matching completed and saved.")

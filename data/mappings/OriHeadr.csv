@@ -1,189 +1,189 @@
 ﻿Column,Column Name,Format,Flag
 1,Version,float,0
-2,Recipient Number,text,0
-3,Account Number,text,1
-4,Account Country,text,0
-5,Invoice Date,data: mm/dd/yyyy,1
-6,Invoice Number,text,1
-7,Invoice Type Code,text,0
-8,Invoice Type Detail Code,text,0
-9,Account Tax ID,text,0
-10,Invoice Currency Code,text,1
+2,Recipient Number,str,0
+3,Account Number,str,1
+4,Account Country,str,0
+5,Invoice Date,date,1
+6,Invoice Number,str,1
+7,Invoice Type Code,str,0
+8,Invoice Type Detail Code,str,0
+9,Account Tax ID,str,0
+10,Invoice Currency Code,str,1
 11,Invoice Amount,float,1
-12,Transaction Date,data: mm/dd/yyyy,1
-13,Pickup Record Number,text,0
-14,Lead Shipment Number,text,1
-15,World Ease Number,text,0
-16,Shipment Reference Number 1,text,1
-17,Shipment Reference Number 2,text,1
-18,Bill Option Code,text,0
+12,Transaction Date,date,1
+13,Pickup Record Number,str,0
+14,Lead Shipment Number,str,1
+15,World Ease Number,str,0
+16,Shipment Reference Number 1,str,1
+17,Shipment Reference Number 2,str,1
+18,Bill Option Code,str,0
 19,Package Quantity,int,0
 20,Oversize Quantity,int,0
-21,Tracking Number,text,1
-22,Package Reference Number 1,text,1
-23,Package Reference Number 2,text,1
-24,Package Reference Number 3,text,0
-25,Package Reference Number 4,text,0
-26,Package Reference Number 5,text,0
+21,Tracking Number,str,1
+22,Package Reference Number 1,str,1
+23,Package Reference Number 2,str,1
+24,Package Reference Number 3,str,0
+25,Package Reference Number 4,str,0
+26,Package Reference Number 5,str,0
 27,Entered Weight,float,1
-28,Entered Weight Unit of Measure,text,0
+28,Entered Weight Unit of Measure,str,0
 29,Billed Weight,int,1
-30,Billed Weight Unit of Measure,text,0
-31,Container Type,text,0
-32,Billed Weight Type,text,1
-33,Package Dimensions,text,1
-34,Zone,text,1
-35,Charge Category Code,text,1
-36,Charge Category Detail Code,text,1
-37,Charge Source,text,0
-38,Type Code 1,text,0
-39,Type Detail Code 1,text,0
-40,Type Detail Value 1,text,0
-41,Type Code 2,text,0
-42,Type Detail Code 2,text,0
-43,Type Detail Value 2,text,0
-44,Charge Classification Code,text,1
-45,Charge Description Code,text,1
-46,Charge Description,text,1
+30,Billed Weight Unit of Measure,str,0
+31,Container Type,str,0
+32,Billed Weight Type,str,1
+33,Package Dimensions,str,1
+34,Zone,str,1
+35,Charge Category Code,str,1
+36,Charge Category Detail Code,str,1
+37,Charge Source,str,0
+38,Type Code 1,str,0
+39,Type Detail Code 1,str,0
+40,Type Detail Value 1,str,0
+41,Type Code 2,str,0
+42,Type Detail Code 2,str,0
+43,Type Detail Value 2,str,0
+44,Charge Classification Code,str,1
+45,Charge Description Code,str,1
+46,Charge Description,str,1
 47,Charged Unit Quantity,int,1
-48,Basis Currency Code,text,1
+48,Basis Currency Code,str,1
 49,Basis Value,float,1
-50,Tax Indicator,text,0
-51,Transaction Currency Code,text,1
+50,Tax Indicator,str,0
+51,Transaction Currency Code,str,1
 52,Incentive Amount,float,1
 53,Net Amount,float,1
-54,Miscellaneous Currency Code,text,0
+54,Miscellaneous Currency Code,str,0
 55,Miscellaneous Incentive Amount,float,0
 56,Miscellaneous Net Amount,float,0
-57,Alternate Invoicing Currency Code,text,0
+57,Alternate Invoicing Currency Code,str,0
 58,Alternate Invoice Amount,float,0
 59,Invoice Exchange Rate,float,0
 60,Tax Variance Amount,float,0
 61,Currency Variance Amount,float,0
 62,Invoice Level Charge,float,0
-63,Invoice Due Date,data: mm/dd/yyyy,0
-64,Alternate Invoice Number,text,0
-65,Store Number,text,0
-66,Customer Reference Number,text,0
-67,Sender Name,text,1
-68,Sender Company Name,text,1
-69,Sender Address Line 1,text,1
-70,Sender Address Line 2,text,1
-71,Sender City,text,1
-72,Sender State,text,1
-73,Sender Postal,text,1
-74,Sender Country,text,1
-75,Receiver Name,text,1
-76,Receiver Company Name,text,1
-77,Receiver Address Line 1,text,1
-78,Receiver Address Line 2,text,1
-79,Receiver City,text,1
-80,Receiver State,text,1
-81,Receiver Postal,text,1
-82,Receiver Country,text,1
-83,Third Party Name,text,0
-84,Third Party Company Name,text,0
-85,Third Party Address Line 1,text,0
-86,Third Party Address Line 2,text,0
-87,Third Party City,text,0
-88,Third Party State,text,0
-89,Third Party Postal,text,0
-90,Third Party Country,text,0
-91,Sold To Name,text,0
-92,Sold To Company Name,text,0
-93,Sold To Address Line 1,text,0
-94,Sold To Address Line 2,text,0
-95,Sold To City,text,0
-96,Sold To State,text,0
-97,Sold To Postal,text,0
-98,Sold To Country,text,0
-99,Miscellaneous Address Qual 1,text,0
-100,Miscellaneous Address 1 Name,text,0
-101,Miscellaneous Address 1 Company Name,text,0
-102,Miscellaneous Address 1 Address Line 1,text,0
-103,Miscellaneous Address 1 Address Line 2,text,0
-104,Miscellaneous Address 1 City,text,0
-105,Miscellaneous Address 1 State,text,0
-106,Miscellaneous Address 1 Postal,text,0
-107,Miscellaneous Address 1 Country,text,0
-108,Miscellaneous Address Qual 2,text,0
-109,Miscellaneous Address 2 Name,text,0
-110,Miscellaneous Address 2 Company Name,text,0
-111,Miscellaneous Address 2 Address Line 1,text,0
-112,Miscellaneous Address 2 Address Line 2,text,0
-113,Miscellaneous Address 2 City,text,0
-114,Miscellaneous Address 2 State,text,0
-115,Miscellaneous Address 2 Postal,text,0
-116,Miscellaneous Address 2 Country,text,0
-117,Shipment Date,data: mm/dd/yyyy,0
-118,Shipment Export Date,data: mm/dd/yyyy,0
-119,Shipment Import Date,data: mm/dd/yyyy,0
-120,Entry Date,data: mm/dd/yyyy,0
-121,Direct Shipment Date,data: mm/dd/yyyy,0
-122,Shipment Delivery Date,data: mm/dd/yyyy,0
-123,Shipment Release Date,data: mm/dd/yyyy,0
-124,Cycle Date,data: mm/dd/yyyy,0
-125,EFT Date,data: mm/dd/yyyy,0
-126,Validation Date,data: mm/dd/yyyy,0
-127,Entry Port,text,0
-128,Entry Number,text,0
-129,Export Place,text,0
+63,Invoice Due Date,date,0
+64,Alternate Invoice Number,str,0
+65,Store Number,str,0
+66,Customer Reference Number,str,0
+67,Sender Name,str,1
+68,Sender Company Name,str,1
+69,Sender Address Line 1,str,1
+70,Sender Address Line 2,str,1
+71,Sender City,str,1
+72,Sender State,str,1
+73,Sender Postal,str,1
+74,Sender Country,str,1
+75,Receiver Name,str,1
+76,Receiver Company Name,str,1
+77,Receiver Address Line 1,str,1
+78,Receiver Address Line 2,str,1
+79,Receiver City,str,1
+80,Receiver State,str,1
+81,Receiver Postal,str,1
+82,Receiver Country,str,1
+83,Third Party Name,str,0
+84,Third Party Company Name,str,0
+85,Third Party Address Line 1,str,0
+86,Third Party Address Line 2,str,0
+87,Third Party City,str,0
+88,Third Party State,str,0
+89,Third Party Postal,str,0
+90,Third Party Country,str,0
+91,Sold To Name,str,0
+92,Sold To Company Name,str,0
+93,Sold To Address Line 1,str,0
+94,Sold To Address Line 2,str,0
+95,Sold To City,str,0
+96,Sold To State,str,0
+97,Sold To Postal,str,0
+98,Sold To Country,str,0
+99,Miscellaneous Address Qual 1,str,0
+100,Miscellaneous Address 1 Name,str,0
+101,Miscellaneous Address 1 Company Name,str,0
+102,Miscellaneous Address 1 Address Line 1,str,0
+103,Miscellaneous Address 1 Address Line 2,str,0
+104,Miscellaneous Address 1 City,str,0
+105,Miscellaneous Address 1 State,str,0
+106,Miscellaneous Address 1 Postal,str,0
+107,Miscellaneous Address 1 Country,str,0
+108,Miscellaneous Address Qual 2,str,0
+109,Miscellaneous Address 2 Name,str,0
+110,Miscellaneous Address 2 Company Name,str,0
+111,Miscellaneous Address 2 Address Line 1,str,0
+112,Miscellaneous Address 2 Address Line 2,str,0
+113,Miscellaneous Address 2 City,str,0
+114,Miscellaneous Address 2 State,str,0
+115,Miscellaneous Address 2 Postal,str,0
+116,Miscellaneous Address 2 Country,str,0
+117,Shipment Date,date,0
+118,Shipment Export Date,date,0
+119,Shipment Import Date,date,0
+120,Entry Date,date,0
+121,Direct Shipment Date,date,0
+122,Shipment Delivery Date,date,0
+123,Shipment Release Date,date,0
+124,Cycle Date,date,0
+125,EFT Date,date,0
+126,Validation Date,date,0
+127,Entry Port,str,0
+128,Entry Number,str,0
+129,Export Place,str,0
 130,Shipment Value Amount,float,0
-131,Shipment Description,text,0
-132,Entered Currency Code,text,0
-133,Customs Number,text,0
+131,Shipment Description,str,0
+132,Entered Currency Code,str,0
+133,Customs Number,str,0
 134,Exchange Rate,float,0
-135,Master Air Waybill Number,text,0
-136,EPU,text,0
-137,Entry Type,text,0
-138,CPC Code,text,0
-139,Line Item Number,text,0
-140,Goods Description,text,0
-141,Entered Value,text,0
+135,Master Air Waybill Number,str,0
+136,EPU,str,0
+137,Entry Type,str,0
+138,CPC Code,str,0
+139,Line Item Number,str,0
+140,Goods Description,str,0
+141,Entered Value,str,0
 142,Duty Amount,float,0
 143,Weight,float,0
-144,Unit of Measure,text,0
+144,Unit of Measure,str,0
 145,Item Quantity,int,0
-146,Item Quantity Unit of Measure,text,0
-147,Import Tax ID,text,0
-148,Declaration Number,text,0
-149,Carrier Name,text,0
-150,CCCD Number,text,0
-151,Cycle Number,text,0
-152,Foreign Trade Reference Number,text,0
-153,Job Number,text,0
-154,Transport Mode,text,0
-155,Tax Type,text,0
-156,Tariff Code,text,0
+146,Item Quantity Unit of Measure,str,0
+147,Import Tax ID,str,0
+148,Declaration Number,str,0
+149,Carrier Name,str,0
+150,CCCD Number,str,0
+151,Cycle Number,str,0
+152,Foreign Trade Reference Number,str,0
+153,Job Number,str,0
+154,Transport Mode,str,0
+155,Tax Type,str,0
+156,Tariff Code,str,0
 157,Tariff Rate,float,0
-158,Tariff Treatment Number,text,0
-159,Contact Name,text,0
-160,Class Number,text,0
-161,Document Type,text,0
-162,Office Number,text,0
-163,Document Number,text,0
+158,Tariff Treatment Number,str,0
+159,Contact Name,str,0
+160,Class Number,str,0
+161,Document Type,str,0
+162,Office Number,str,0
+163,Document Number,str,0
 164,Duty Value,float,0
 165,Total Value for Duty,float,0
 166,Excise Tax Amount,float,0
 167,Excise Tax Rate,float,0
 168,GST Amount,float,0
 169,GST Rate,float,0
-170,Order In Council,text,0
-171,Origin Country,text,0
-172,SIMA Access,text,0
+170,Order In Council,str,0
+171,Origin Country,str,0
+172,SIMA Access,str,0
 173,Tax Value,float,0
 174,Total Customs Amount,float,0
-175,Miscellaneous Line 1,text,1
-176,Miscellaneous Line 2,text,1
-177,Miscellaneous Line 3,text,1
-178,Miscellaneous Line 4,text,1
-179,Miscellaneous Line 5,text,1
-180,Payer Role Code,text,0
-181,Miscellaneous Line 7,text,0
-182,Miscellaneous Line 8,text,0
-183,Miscellaneous Line 9,text,0
-184,Miscellaneous Line 10,text,0
-185,Miscellaneous Line 11,text,0
+175,Miscellaneous Line 1,str,1
+176,Miscellaneous Line 2,str,1
+177,Miscellaneous Line 3,str,1
+178,Miscellaneous Line 4,str,1
+179,Miscellaneous Line 5,str,1
+180,Payer Role Code,str,0
+181,Miscellaneous Line 7,str,0
+182,Miscellaneous Line 8,str,0
+183,Miscellaneous Line 9,str,0
+184,Miscellaneous Line 10,str,0
+185,Miscellaneous Line 11,str,0
 186,Duty Rate,float,0
 187,VAT Basis Amount,float,0
 188,VAT Amount,float,0
@@ -191,61 +191,61 @@
 190,Other Basis Amount,float,0
 191,Other Amount,float,0
 192,Other Rate,float,0
-193,Other Customs Number Indicator,text,0
-194,Other Customs Number,text,0
-195,Customs Office Name,text,0
-196,Package Dimension Unit Of Measure,text,0
+193,Other Customs Number Indicator,str,0
+194,Other Customs Number,str,0
+195,Customs Office Name,str,0
+196,Package Dimension Unit Of Measure,str,0
 197,Original Shipment Package Quantity,int,1
-198,Place Holder 24,text,0
-199,Place Holder 25,text,0
-200,Place Holder 26,text,0
-201,Place Holder 27,text,1
-202,Place Holder 28,text,0
-203,Place Holder 29,text,0
-204,Place Holder 30,text,0
-205,Place Holder 31,text,0
-206,BOL # 1,text,0
-207,BOL # 2,text,0
-208,BOL # 3,text,0
-209,BOL # 4,text,0
-210,BOL # 5,text,0
-211,PO # 1,text,0
-212,PO # 2,text,0
-213,PO # 3,text,0
-214,PO # 4,text,0
-215,PO # 5,text,0
-216,PO # 6,text,0
-217,PO # 7,text,0
-218,PO # 8,text,0
-219,PO # 9,text,0
-220,PO # 10,text,0
-221,NMFC,text,0
-222,Detail Class,text,0
-223,Freight Sequence Number,text,0
-224,Declared Freight Class,text,0
-225,Place Holder 34,text,0
-226,Place Holder 35,text,1
-227,Place Holder 36,text,0
-228,Place Holder 37,text,0
-229,Place Holder 38,text,0
-230,Place Holder 39,text,0
-231,Place Holder 40,text,0
-232,Place Holder 41,text,0
-233,Place Holder 42,text,0
-234,Place Holder 43,text,0
-235,Place Holder 44,text,0
-236,Place Holder 45,text,0
-237,Place Holder 46,text,0
-238,Place Holder 47,text,0
-239,Place Holder 48,text,0
-240,Place Holder 49,text,0
-241,Place Holder 50,text,0
-242,Place Holder 51,text,0
-243,Place Holder 52,text,0
-244,Place Holder 53,text,0
-245,Place Holder 54,text,0
-246,Place Holder 55,text,0
-247,Place Holder 56,text,0
-248,Place Holder 57,text,0
-249,Place Holder 58,text,0
-250,Place Holder 59,text,0
+198,Place Holder 24,str,0
+199,Place Holder 25,str,0
+200,Place Holder 26,str,0
+201,Place Holder 27,str,1
+202,Place Holder 28,str,0
+203,Place Holder 29,str,0
+204,Place Holder 30,str,0
+205,Place Holder 31,str,0
+206,BOL # 1,str,0
+207,BOL # 2,str,0
+208,BOL # 3,str,0
+209,BOL # 4,str,0
+210,BOL # 5,str,0
+211,PO # 1,str,0
+212,PO # 2,str,0
+213,PO # 3,str,0
+214,PO # 4,str,0
+215,PO # 5,str,0
+216,PO # 6,str,0
+217,PO # 7,str,0
+218,PO # 8,str,0
+219,PO # 9,str,0
+220,PO # 10,str,0
+221,NMFC,str,0
+222,Detail Class,str,0
+223,Freight Sequence Number,str,0
+224,Declared Freight Class,str,0
+225,Place Holder 34,str,0
+226,Place Holder 35,str,1
+227,Place Holder 36,str,0
+228,Place Holder 37,str,0
+229,Place Holder 38,str,0
+230,Place Holder 39,str,0
+231,Place Holder 40,str,0
+232,Place Holder 41,str,0
+233,Place Holder 42,str,0
+234,Place Holder 43,str,0
+235,Place Holder 44,str,0
+236,Place Holder 45,str,0
+237,Place Holder 46,str,0
+238,Place Holder 47,str,0
+239,Place Holder 48,str,0
+240,Place Holder 49,str,0
+241,Place Holder 50,str,0
+242,Place Holder 51,str,0
+243,Place Holder 52,str,0
+244,Place Holder 53,str,0
+245,Place Holder 54,str,0
+246,Place Holder 55,str,0
+247,Place Holder 56,str,0
+248,Place Holder 57,str,0
+249,Place Holder 58,str,0
+250,Place Holder 59,str,0
