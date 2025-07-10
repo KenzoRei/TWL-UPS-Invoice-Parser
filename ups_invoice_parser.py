@@ -143,13 +143,14 @@ class UpsInvNormalizer:
         df['Account Number'] = df['Account Number'].astype(str).str[-6:]
         df['Invoice Number'] = df['Invoice Number'].astype(str).str[-9:]
 
+        # Divide "dimension" into 3 columns
         df['Package Dimensions'] = df['Package Dimensions'].str.replace(' ', '', regex=False)
         dims = df['Package Dimensions'].str.split('x', expand=True).astype(float)
         dims.columns = ['Billed Length', 'Billed Width', 'Billed Height']
         idx = df.columns.get_loc('Package Dimensions') + 1
         for i, col in enumerate(dims.columns):
             df.insert(idx + i, col, dims[col])
-        
+        # Divide entered dimension into 3 columns
         df['Place Holder 35'] = df['Place Holder 35'].str.replace(' ', '', regex=False)
         dims2 = df['Place Holder 35'].str.split('x', expand=True).astype(float)
         dims2.columns = ['Entered Length', 'Entered Width', 'Entered Height']
@@ -206,6 +207,8 @@ class UpsCustomerMatcher:
         """
         self.df = normalized_df.copy()  # Keep original safe
         self.df["cust_id"] = ""  # Add empty column if not exist
+        self.df["Charge_Cate_EN"] = ""
+        self.df["Charge_Cate_CN"] = ""
         self.base_path = Path(__file__).resolve().parent
         self.mapping_path = self.base_path / "input" / "数据列表.xlsx"
         self.mapping_df = pd.DataFrame()
@@ -243,75 +246,64 @@ class UpsCustomerMatcher:
         }
 
     def match_customers(self):
-        """Match and overwrite cust_id and Lead Shipment Number in self.df."""
-        col_name = ["客户代码", "转单号", "承运商子单号", "客户单号(文本格式)", "收货渠道", "目的地国家", 
-                    "件数", "总实重", "长", "宽", "高", "收件人姓名", "收件公司", "收件人地址一", "收件人地址二", 
-                    "城市", "省份/洲名简码", "邮编", "收件人电话", "包裹类型", "报关方式", "付税金", "中文品名", 
-                    "英文品名", "海关编码", "数量", "币种", "单价", "总价", "购买保险", "寄件人姓名", "寄件公司", 
-                    "寄件人地址一", "寄件人地址二", "寄件人城市", "寄件人州名", "寄件人邮编", "寄件人国家", "寄件电话", 
-                    "货物特性", "收货备注", "预报备注", "idx"
-                    ]
-        ydd_template = pd.DataFrame(columns=col_name)
+        """
+        1. Match and overwrite cust_id and Lead Shipment Number in self.df.
+        2. Return exceptions for later handling
+        """
+        exception_rows = []
         for idx, row in self.df.iterrows():
-            trk_num = str(row["Tracking Number"]).replace(" ", "").replace("[", "").replace("]", "")
-            new_row = {}
+            trk_num = str(row["Tracking Number"])
             if trk_num in self.trk_to_cust:
                 cust_id, lead_shipment = self.trk_to_cust[trk_num]
-                self.df.at[idx, "cust_id"] = cust_id
-                self.df.at[idx, "Lead Shipment Number"] = lead_shipment
             else:
-                self.df.at[idx, "cust_id"] = self._exception_handler(row)
-                if self.df.at[idx, "Lead Shipment Number"] == "":
-                    self.df.at[idx, "Lead Shipment Number"] = self.df.at[idx, "Tracking Number"]
-                new_row = {
-                    "客户代码": self.df.at[idx, "cust_id"], 
-                    "转单号": self.df.at[idx, "Lead Shipment Number"], 
-                    "承运商子单号": self.df.at[idx, "Tracking Number"], 
-                    "客户单号(文本格式)": str(self.df.at[idx, "Tracking Number"])+"-"+ \
-                        str(self.df.at[idx, "Shipment Reference Number 1"])[:30], 
-                    "收货渠道": "UPS Ground", 
-                    "目的地国家": "US", 
-                    "件数": 1, 
-                    "总实重": math.ceil(self.df.at[idx, "Billed Weight"]/2.204), 
-                    "长": math.ceil(self.df.at[idx, "Billed Length"]*2.54), 
-                    "宽": math.ceil(self.df.at[idx, "Billed Width"]*2.54), 
-                    "高": math.ceil(self.df.at[idx, "Billed Height"]*2.54), 
-                    "收件人姓名": self.df.at[idx, "Receiver Name"], 
-                    "收件公司": self.df.at[idx, "Receiver Company Name"], 
-                    "收件人地址一": self.df.at[idx, "Receiver Address Line 1"], 
-                    "收件人地址二": self.df.at[idx, "Receiver Address Line 2"], 
-                    "城市": self.df.at[idx, "Receiver City"], 
-                    "省份/洲名简码": self.df.at[idx, "Receiver State"], 
-                    "邮编": self.df.at[idx, "Receiver Postal"], 
-                    "收件人电话": "000-000-0000", 
-                    "包裹类型": "", 
-                    "报关方式": "", 
-                    "付税金": "", 
-                    "中文品名": "", 
-                    "英文品名": "", 
-                    "海关编码": "", 
-                    "数量": "", 
-                    "币种": "", 
-                    "单价": "", 
-                    "总价": "", 
-                    "购买保险": "", 
-                    "寄件人姓名": self.df.at[idx, "Receiver Postal"], 
-                    "寄件公司": self.df.at[idx, "Receiver Postal"], 
-                    "寄件人地址一": self.df.at[idx, "Receiver Postal"], 
-                    "寄件人地址二": self.df.at[idx, "Receiver Postal"], 
-                    "寄件人城市": self.df.at[idx, "Receiver Postal"], 
-                    "寄件人州名": self.df.at[idx, "Receiver Postal"], 
-                    "寄件人邮编": self.df.at[idx, "Receiver Postal"], 
-                    "寄件人国家": "US", 
-                    "寄件电话": "000-000-0000", 
-                    "货物特性": "", 
-                    "收货备注": "", 
-                    "预报备注": ""
-                }
-    def _exception_handler(self, row):
+                cust_id = self._exception_handler(row)
+                if row["Lead Shipment Number"] == '':
+                    lead_shipment = trk_num
+                # other possible handlings
+            self.df.at[idx, "cust_id"] = cust_id
+            self.df.at[idx, "Lead Shipment Number"] = lead_shipment
 
-    def _tempalte_generator(self):
+            category_en, category_cn = self._charge_classifier(row)
+            self.df.at[idx, "Charge_Cate_EN"] = category_en
+            self.df.at[idx, "Charge_Cate_CN"] = category_cn
+
+        self._ar_calculator()
+        df_exception = pd.DataFrame(exception_rows)
+        self._tempalte_generator(df_exception)
+
+    def _exception_handler(self, row: pd.Series) -> str:
+        """Manually match a shipment with cust.id and return cust.id"""
+        cust_id = ""
+        # rule for general cost (don't allocate to customers)
+
+        # rule for customer cost
+        if row["Account Number"]  in ["K5811C", "F03A44"]:
+            cust_id = "F000281" # Bondex
+        elif row["Account Number"] == "HE6132":
+            cust_id = "F000208" # SPT
+        else:
+            cust_id = "F000222" # Transware
+        # matchup rules
+        return cust_id
     
+    def _charge_classifier(self, row) -> tuple[str, str]:
+        """
+        Classify charge by charge description and all kinds of class codes
+        return category in both English and Chinese version
+        """
+
+    def _tempalte_generator(self, df: pd.DataFrame):
+        """Generate an YiDiDa template and save is to output folder"""
+        df_exceptions = df
+        
+        
+    def _ar_calculator(self):
+        """Calculate ar amount according to cust_id"""
+        # verify if there is any empty cust_id
+        
+        # import customer charge info from mapping folder
+
+        # calculate ar amount    
 
     def get_matched_data(self) -> pd.DataFrame:
         """Return the updated DataFrame with customer info matched."""
