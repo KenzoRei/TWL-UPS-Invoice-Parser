@@ -132,7 +132,13 @@ class UpsInvNormalizer:
 
     def standardize_invoices(self):
         """Standardize and enrich columns as per business rules."""
-        df = self.normalized_df
+
+        # to confirm string columns are converted correctly
+        str_cols = self.headers.loc[(self.headers['Flag'] == 1) & (self.headers['Format'] == 'str'), 'Column Name'].tolist()
+        for col in str_cols:
+            self.normalized_df[col] = self.normalized_df[col].astype(str)
+
+        df = self.normalized_df        
 
         # Convert to datetime after columns are renamed
         if 'Invoice Date' in df.columns:
@@ -162,8 +168,8 @@ class UpsInvNormalizer:
         df.insert(insert_idx, 'Basis Amount', df['Incentive Amount'] + df['Net Amount'])
 
         charge_idx = df.columns.get_loc('Charge Description') + 1
-        df.insert(charge_idx, 'Category_EN', '')
-        df.insert(charge_idx + 1, 'Category_CN', '')
+        df.insert(charge_idx, 'Charge_Cate_EN', '')
+        df.insert(charge_idx + 1, 'Charge_Cate_CN', '')
 
         self.normalized_df = df
 
@@ -206,29 +212,50 @@ class UpsCustomerMatcher:
         :param normalized_df: DataFrame output from normalizer.get_normalized_data()
         """
         self.df = normalized_df.copy()  # Keep original safe
-        self.df["cust_id"] = ""  # Add empty column if not exist
+        if "cust_id" not in self.df.columns: # Add empty column if not exist
+            self.df["cust_id"] = ""
         self.df["Charge_Cate_EN"] = ""
         self.df["Charge_Cate_CN"] = ""
+        self.DEFAULT_CUST_ID = "F000999"
         self.base_path = Path(__file__).resolve().parent
-        self.mapping_path = self.base_path / "input" / "数据列表.xlsx"
-        self.mapping_df = pd.DataFrame()
+        self.mapping_cust = self.base_path / "input" / "数据列表.xlsx"               # for cust.id mapping
+        self.mapping_cust_df = pd.DataFrame()
+        self.mapping_pickup = self.base_path / "data" / "mappings" / "Pickups.csv"  # for daily pickup mapping
+        self.mapping_pickup_df = pd.DataFrame()
+        self.mapping_chrg = self.base_path / "data" / "mappings" / "Charges.csv"    # for charge category mapping
+        self.mapping_chrg_df = pd.DataFrame()
+        self.mapping_ar = self.base_path / "data" / "mappings" / "ARCalculator.csv" # for ar amount amplifier & modifier flag mapping
+        self.mapping_ar_df = pd.DataFrame() 
         self.trk_to_cust = {}
 
-        self._load_mapping()
-        self._build_lookup_dict()
+        self._load_mapping()        
 
     def _load_mapping(self):
-        """Load 数据列表.xlsx into self.mapping_df."""
-        self.mapping_df = pd.read_excel(self.mapping_path)
+
+        # Load 数据列表.xlsx into self.mapping_cust_df. and flatten it into dict self.trk_to_cust
+        self.mapping_cust_df = pd.read_excel(self.mapping_cust)
         required_cols = {"子转单号", "客户编号", "转单号"}
-        if not required_cols.issubset(set(self.mapping_df.columns)):
+        if not required_cols.issubset(set(self.mapping_cust_df.columns)):
             raise ValueError(f"Mapping file missing required columns: {required_cols}")
+        self._build_lookup_dict()
+        
+        # Load Charges.csv into dict self.dict_chrg     
+        self.mapping_chrg_df = pd.read_csv(self.mapping_chrg)
+        self.dict_chrg = self.mapping_chrg_df.set_index(self.mapping_chrg_df.columns[0]).to_dict(orient="index")
+
+        # Load Pickups.csv into dict self.dict_pickup
+        self.mapping_pickup_df = pd.read_csv(self.mapping_pickup)
+        self.dict_pickup = self.mapping_pickup_df.set_index(self.mapping_pickup_df.columns[0]).to_dict(orient="index")
+
+        # Load ARCalculator.csv into dict self.dict_ar
+        self.mapping_ar_df = pd.read_csv(self.mapping_ar)
+        self.dict_ar = self.mapping_ar_df.set_index(self.mapping_ar_df.columns[0]).to_dict(orient="index")
 
     def _build_lookup_dict(self):
         """Flatten mapping and build dictionary: {Tracking Number: (客户编号, 转单号)}."""
         mapping_records = []
 
-        for _, row in self.mapping_df.iterrows():
+        for _, row in self.mapping_cust_df.iterrows():
             sub_trks = str(row["子转单号"]).split(",")
             for trk in sub_trks:
                 cleaned_trk = trk.replace(" ", "").replace("[", "").replace("]", "")
@@ -247,15 +274,24 @@ class UpsCustomerMatcher:
 
     def match_customers(self):
         """
-        1. Match and overwrite cust_id and Lead Shipment Number in self.df.
-        2. Return exceptions for later handling
+        1. Match and overwrite cust_id and Lead Shipment Number in self.df
+        2. Generate YiDiDa import template for unmatched charges
+        3. Calculate AR amount
         """
         exception_rows = []
         for idx, row in self.df.iterrows():
+
+            # classify charges
+            category_en, category_cn = self._charge_classifier(row)
+            self.df.at[idx, "Charge_Cate_EN"] = category_en
+            self.df.at[idx, "Charge_Cate_CN"] = category_cn
+
+            # matchup cust.id
             trk_num = str(row["Tracking Number"])
             if trk_num in self.trk_to_cust:
                 cust_id, lead_shipment = self.trk_to_cust[trk_num]
             else:
+                exception_rows.append(row.to_dict())
                 cust_id = self._exception_handler(row)
                 if row["Lead Shipment Number"] == '':
                     lead_shipment = trk_num
@@ -263,47 +299,136 @@ class UpsCustomerMatcher:
             self.df.at[idx, "cust_id"] = cust_id
             self.df.at[idx, "Lead Shipment Number"] = lead_shipment
 
-            category_en, category_cn = self._charge_classifier(row)
-            self.df.at[idx, "Charge_Cate_EN"] = category_en
-            self.df.at[idx, "Charge_Cate_CN"] = category_cn
-
         self._ar_calculator()
         df_exception = pd.DataFrame(exception_rows)
-        self._tempalte_generator(df_exception)
+        self._template_generator(df_exception)
+
+        # Save all rows with undefined charge categories
+        unmapped_charges = self.df[self.df["Charge_Cate_EN"] == "Not Defined Charge"]
+        if not unmapped_charges.empty:
+            output_path = self.base_path / "output" / "UnmappedCharges.xlsx"
+            output_path.parent.mkdir(parents=True, exist_ok=True)  # Ensure folder exists
+            unmapped_charges.to_excel(output_path, index=False)
 
     def _exception_handler(self, row: pd.Series) -> str:
-        """Manually match a shipment with cust.id and return cust.id"""
-        cust_id = ""
-        # rule for general cost (don't allocate to customers)
+        """Manually match a shipment with cust_id and return it."""
 
-        # rule for customer cost
-        if row["Account Number"]  in ["K5811C", "F03A44"]:
-            cust_id = "F000281" # Bondex
+        # 1. Import department pickup
+        if (
+            row["Lead Shipment Number"].startswith("2") and
+            "import" in row["Shipment Reference Number 1"].lower()
+        ):
+            return self.DEFAULT_CUST_ID
+
+        # 2. UPEX (vermilion match)
+        elif (
+            "vermilion" in row["Sender Name"].lower() or
+            "vermilion" in row["Sender Company Name"].lower() or
+            "vermilion" in row["Shipment Reference Number 1"].lower()
+        ):
+            return "F000215"
+
+        # 3. Bondex
+        elif row["Account Number"] in ["K5811C", "F03A44"]:
+            return "F000281"
+
+        # 4. SPT
         elif row["Account Number"] == "HE6132":
-            cust_id = "F000208" # SPT
-        else:
-            cust_id = "F000222" # Transware
-        # matchup rules
-        return cust_id
+            return "F000208"
+
+        # 5. Transware
+        elif row["Tracking Number"] != "nan" or row["Lead Shipment Number"] != "nan":
+            return "F000222"
+
+        # 6. Daily Pickup logic
+        elif row["Charge_Cate_EN"] in ["Daily Pickup", "Daily Pickup - Fuel"]:
+            return self.dict_pickup.get(row["Account Number"], {}).get("Cust.ID", self.DEFAULT_CUST_ID)
+
+        # 7. Generic cost rules
+        elif row["Charge_Cate_EN"] in ["processing fee", "SCC audit fee", "POD fee"]:
+            return self.DEFAULT_CUST_ID
+
+        # 8. Fallback
+        return self.DEFAULT_CUST_ID
+
     
-    def _charge_classifier(self, row) -> tuple[str, str]:
+    def _charge_classifier(self, row: pd.Series) -> tuple[str, str]:
         """
-        Classify charge by charge description and all kinds of class codes
+        Classify charge by "charge description" and all types of class codes
         return category in both English and Chinese version
         """
 
-    def _tempalte_generator(self, df: pd.DataFrame):
+        ChrgDesc = row["Charge Description"]
+        Chrg_EN = "Not Defined Charge"
+        Chrg_CN = "未分类费用"
+        for term in [
+            "Not Previously Billed ",
+            "Void ",
+            "Shipping Charge Correction ",
+            " Adjustment",
+            "ZONE ADJUSTMENT "
+            ]:
+            ChrgDesc = ChrgDesc.replace(term, "")
+        
+        if row["Tracking Number"] == "nan" and row["Charge Category Detail Code"] == "SVCH":
+            if row["Charge Description"] == "Payment Processing Fee":
+                Chrg_EN = "Payment Processing Fee"
+                Chrg_CN = "信用卡手续费"
+            elif row["Charge Description"] == "Fuel Surcharge":
+                Chrg_EN = "Daily Pickup - Fuel"
+                Chrg_CN = "每日取件-燃油"
+            elif row["Charge Description"] == "Service Charge":
+                Chrg_EN = "Daily Pickup"
+                Chrg_CN = "每日取件"
+        elif ChrgDesc in self.dict_chrg:
+            Chrg_EN = self.dict_chrg[ChrgDesc]["Charge_Cate_EN"]
+            Chrg_CN = self.dict_chrg[ChrgDesc]["Charge_Cate_CN"]
+        elif row["Charge Category Detail Code"] == "CADJ" and row["Charge Classification Code"] == "MSC":
+            if "audit fee" in row["Miscellaneous Line 1"].lower():
+                Chrg_EN = "SCC Audit Fee"
+                Chrg_CN = "UPS SCC审计费"
+            else:
+                Chrg_EN = "Shipping Charge Correction"
+                Chrg_CN = "费用修正"
+        elif row["Charge Category Detail Code"] == "FPOD":
+            Chrg_EN = "POD Fee"
+            Chrg_CN = "送抵证明"
+        
+        return Chrg_EN, Chrg_CN
+        
+    def _template_generator(self, df: pd.DataFrame):
         """Generate an YiDiDa template and save is to output folder"""
         df_exceptions = df
+        # waiting edit
         
         
     def _ar_calculator(self):
         """Calculate ar amount according to cust_id"""
-        # verify if there is any empty cust_id
+        # verify self.df
+        empty_cust_id_rows = self.df[self.df["cust_id"] == "nan"]
+        if not empty_cust_id_rows.empty:
+            print(f"[Warning] {len(empty_cust_id_rows)} rows have empty cust_id.") # log output?
+        invalid_cust_id_rows = self.df[~self.df["cust_id"].isin(self.dict_ar.keys())]
+        if not invalid_cust_id_rows.empty:
+            print(f"[Warning] {len(invalid_cust_id_rows)} rows have unmapped cust_id (not in AR mapping).") # log output?
         
-        # import customer charge info from mapping folder
+        # Calculate AR Amount using business rules and AR factor mapping.
+        # Extract mapping components as Series via dict lookup
+        self.df["AR_Factor"] = self.df["cust_id"].map(lambda cid: self.dict_ar.get(cid, {}).get("Factor", 0.0))
+        self.df["Flag_Modifier"] = self.df["cust_id"].map(lambda cid: self.dict_ar.get(cid, {}).get("Flag_Modifier", ""))
 
-        # calculate ar amount    
+        # Business rule — if SIM + negative + no modifier → AR = 0
+        cond_special_zero = (
+            (self.df["Charge_Cate_EN"] == "Special Incentive Modifier") &
+            (self.df["Net Amount"] < 0) &
+            (self.df["Flag_Modifier"] == "")
+        )
+
+        # Default AR amount = Net × Factor
+        self.df["AR_Amount"] = (self.df["Net Amount"] * self.df["AR_Factor"]).round(2)
+
+        # Apply override where condition is met
+        self.df.loc[cond_special_zero, "AR_Amount"] = 0.00
 
     def get_matched_data(self) -> pd.DataFrame:
         """Return the updated DataFrame with customer info matched."""

@@ -1,6 +1,7 @@
 from ups_invoice_parser import UpsInvNormalizer  # Your existing normalizer class
 from ups_invoice_parser import UpsCustomerMatcher 
 from pathlib import Path
+import pandas as pd
 
 # Get normalized data
 base_path = Path(__file__).resolve().parent

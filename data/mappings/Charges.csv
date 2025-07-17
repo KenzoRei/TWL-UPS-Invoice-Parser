@@ -1,0 +1,80 @@
+﻿Charge Description,Charge_Cate_EN,Charge_Cate_CN
+2nd Day Air Commercial,Transportation Charge,运费
+2nd Day Air Residential,Transportation Charge,运费
+3 Day Select,Transportation Charge,运费
+3 Day Select Commercial,Transportation Charge,运费
+3 Day Select Residential,Transportation Charge,运费
+Address Correction Ground,Address Correction Fee,地址修正费
+Commercial,Transportation Charge,运费
+Ground,Transportation Charge,运费
+Ground Commercial,Transportation Charge,运费
+Ground Residential,Transportation Charge,运费
+Next Day Air,Transportation Charge,运费
+Next Day Air Commercial,Transportation Charge,运费
+Next Day Air Residential,Transportation Charge,运费
+Next Day Air Saver Commercial,Transportation Charge,运费
+Next Day Air Saver Residential,Transportation Charge,运费
+Residential,Transportation Charge,运费
+Future Day Pickup - Alternate Address - Phone Request,Pickup Fee,取件费
+Future Day Pickup - Alternate Address - Web Request,Pickup Fee,取件费
+Future Day Pickup - Web Request,Pickup Fee,取件费
+On-call Saturday Stop Charge,Pickup Fee,取件费
+Residential Pickup surcharge,Pickup Fee,取件费
+Returns 3 UPS Pickup Attempts,Pickup Fee,取件费
+Same Day Pickup - Alternate Address - Phone Request,Pickup Fee,取件费
+Same Day Pickup - Alternate Address - Web Request,Pickup Fee,取件费
+Same Day Pickup - Phone Request,Pickup Fee,取件费
+Same Day Pickup - Web Request,Pickup Fee,取件费
+Delivery Confirmation Signature,Delivery Confirmation Signature,签收
+Delivery Confirmation Signature - Commercial,Delivery Confirmation Signature,签收
+Delivery Confirmation Signature - Residential,Delivery Confirmation Signature,签收
+Ground Hundredweight Undeliverable Return,Transportation Charge - Return,运费-退件费
+Ground Return to Sender,Transportation Charge - Return,运费-退件费
+Ground Undeliverable Return,Transportation Charge - Return,运费-退件费
+Additional Handling - Length+Girth,AHS - L+G,AHS-周长
+Demand Surcharge-Com,Demand Surcharge,旺季附加费
+Demand Surcharge-Resi,Demand Surcharge,旺季附加费
+Ground Commercial UPS Delivery Intercept,Delivery Intercept,拦截费
+Ground Residential UPS Delivery Intercept,Delivery Intercept,拦截费
+Large Package Surcharge Resi  - Length + Girth,AHS - L+G,AHS-周长
+Reroute,Reroute,地址更正费
+Reroute - Web Request,Reroute,地址更正费
+Residential Surcharge,Residential Surcharge,私人地址
+Return To Sender - Phone Request,Return To Sender Request,退件费
+Return To Sender - Web Request,Return To Sender Request,退件费
+Shipment Residential Surcharge,Residential Surcharge,私人地址
+ACC-Saturday Delivery,ACC-Saturday Delivery,周六派送手续费
+Additional Handling,AHS,AHS
+Addl. Handling longest side,AHS - Len,AHS-超长
+Addl. Handling second long. Side,AHS - Wid,AHS-宽
+Addl. Handling weight,AHS - Wgt,AHS-超重
+Address Correction,Address Correction,地址更正费
+Address Correction Fuel Surcharge,Address Correction Fuel Surcharge,地址更正费-燃油
+Canada Residential Surcharge,Canada Residential Surcharge,私人地址（加拿大）
+Declared Value,Declared Value,保险费
+Delivery Area Surcharge,Delivery Area Surcharge,偏远费
+Delivery Area Surcharge - Extended,Delivery Area Surcharge - Extended,超偏远地区费
+Demand Surcharge - Commercial,Demand Surcharge - Commercial,旺季费-商业
+Demand Surcharge - Residential,Demand Surcharge - Residential,旺季费-住宅
+Demand Surcharge Addl Handling,Demand Surcharge Addl Handling,旺季费-AHS
+Demand Surcharge Large Package,Demand Surcharge Large Package,旺季费-超大件
+Demand Surcharge-Addl Handling,Demand Surcharge-Addl Handling,旺季费-AHS
+Demand Surcharge-Large Package,Demand Surcharge-Large Package,旺季费-超大件
+Fuel Surcharge,Fuel Surcharge,燃油费
+Ground Commercial Collect,Ground Commercial Collect,COD手续费
+Ground Commercial Third Party,Ground Commercial Third Party,第三方-商业
+Ground Hundredweight,Transportation Charge - HWT,运费-Hundredweight
+Ground Residential Third Party,Ground Residential Third Party,第三方-住宅
+Large Package Surcharge - Length + Girth,Large Package Surcharge - Length + Girth,超大件-周长
+Large Package Surcharge Resi,Large Package Surcharge Resi,超大件-住宅费
+Missing PLD Fee,Missing PLD Fee,包裹信息缺失服务费
+Over Maximum Length,Over Maximum Length,超最大限制-长度
+Paper Commercial Invoice Surcharge,Paper Commercial Invoice Surcharge,纸质账单费
+Pickup Area Surcharge,Pickup Area Surcharge,偏远费-取件
+Prohibited Item Fee,Prohibited Item Fee,违禁物品
+Remote Area Surcharge,Remote Area Surcharge,极偏远费
+Reschedule Delivery - Phone Request,Reschedule Delivery,指定日期派送附加费
+SCC Audit Fee,SCC Audit Fee,UPS审计费
+Shipping Charge Correction,Shipping Charge Correction,费用修正
+Special Incentive Modifier,Special Incentive Modifier,商业件额外修正
+Worldwide Expedited,Worldwide Expedited,Worldwide Expedited
