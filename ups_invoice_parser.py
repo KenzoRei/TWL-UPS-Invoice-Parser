@@ -280,6 +280,7 @@ class UpsCustomerMatcher:
         """
         exception_rows = []
         for idx, row in self.df.iterrows():
+            cust_id, lead_shipment = "nan", "nan"
 
             # classify charges
             category_en, category_cn = self._charge_classifier(row)
@@ -293,12 +294,17 @@ class UpsCustomerMatcher:
             else:
                 exception_rows.append(row.to_dict())
                 cust_id = self._exception_handler(row)
-                if row["Lead Shipment Number"] == '':
+                if row["Lead Shipment Number"] == "nan":
                     lead_shipment = trk_num
+                else:
+                    lead_shipment = row["Lead Shipment Number"]
                 # other possible handlings
             self.df.at[idx, "cust_id"] = cust_id
+            # REMINDER: overwrite lead shipment# and trk# may lead to info loss!!
             self.df.at[idx, "Lead Shipment Number"] = lead_shipment
-
+            if row["Tracking Number"] == "nan":
+                self.df.at[idx, "Tracking Number"] = lead_shipment
+ 
         self._ar_calculator()
         df_exception = pd.DataFrame(exception_rows)
         self._template_generator(df_exception)
@@ -454,17 +460,184 @@ class UpsCustomerMatcher:
 # matched_df.to_excel("matched_output.xlsx", index=False)
 # print("✅ Matching completed and saved.")
 
-
+from datetime import datetime
 from models import Invoice, Shipment, Package, Charge, Location
 class UpsInvoiceBuilder:
     def __init__(self, normalized_df: pd.DataFrame):
         self.df = normalized_df
+        self.output_path = Path(__file__).resolve().parent / "data" / "raw_invoices"
         self.invoices: dict[str, Invoice] = {}
+
+    def _parse_date(self, val):
+        if pd.isna(val):
+            return None
+        return pd.to_datetime(val).date()
 
     def build_invoices(self):
         """Convert normalized DataFrame into nested Invoice → Shipment → Package → Charge structure."""
-        # Your grouping & object creation logic here
 
+        # verify headers
+        missing_cols = self._verify_invoice(self.df)
+        if missing_cols != []:
+            missing_cols_list = ",".join(missing_cols)
+            # TODO: complete warning msg/log msg
+            print("missing columns: " + missing_cols_list)
+        
+        # Your grouping & object creation logic here
+        for _, row in self.df.iterrows():
+            
+            inv_num = row["Invoice Number"]
+            if inv_num not in self.invoices:
+                # create invoice info
+                invoice = Invoice()
+                invoice.carrier = "UPS"
+                invoice.inv_date = self._parse_date(row["Invoice Date"])
+                invoice.inv_num = row["Invoice Number"]
+                invoice.acct_num = row["Account Number"]
+                invoice.batch_num = invoice.inv_num[-3:]
+
+            # for general invoice cost (don't allocate to costomer)
+            if row["Lead Shipment Number"] in ["", "nan"]:
+                self._build_invoice_cost(row, invoice)
+            
+            # add/update shipment info
+            else:
+                self._build_shipment(row, invoice)
+
+    def _verify_invoice(self, df: pd.DataFrame) -> list:
+        missing_cols = []
+        col_names = ["Account Number", "Invoice Date", "Invoice Number", 
+                     "Invoice Currency Code", "Invoice Amount", 
+                     "Transaction Date", "Lead Shipment Number", 
+                     "Shipment Reference Number 1", "Shipment Reference Number 2", 
+                     "Tracking Number", "Package Reference Number 1", 
+                     "Package Reference Number 2", "Entered Weight", 
+                     "Billed Weight", "Billed Weight Type", "Billed Length", 
+                     "Billed Width", "Billed Height", "Zone", "Charge_Cate_EN", 
+                     "Charge_Cate_CN", "Charged Unit Quantity", 
+                     "Transaction Currency Code", "Basis Amount", 
+                     "Incentive Amount", "Net Amount", "Sender Name", 
+                     "Sender Company Name", "Sender Address Line 1", 
+                     "Sender Address Line 2", "Sender City", "Sender State", 
+                     "Sender Postal", "Sender Country", "Receiver Name", 
+                     "Receiver Company Name", "Receiver Address Line 1", 
+                     "Receiver Address Line 2", "Receiver City", "Receiver State", 
+                     "Receiver Postal", "Receiver Country", "Miscellaneous Line 1", 
+                     "Miscellaneous Line 2", "Miscellaneous Line 3", 
+                     "Miscellaneous Line 4", "Miscellaneous Line 5", 
+                     "Original Shipment Package Quantity", "Entered Length", 
+                     "Entered Width", "Entered Height", "cust_id", "AR_Amount"]
+        for col_name in col_names:
+            if col_name not in df.columns:
+                missing_cols.append(col_name)
+        return missing_cols
+
+    def _build_shipment(self, row: pd.Series, invoice: Invoice):
+        Lead_Shipment_Num = row["Lead Shipment Number"]
+        if Lead_Shipment_Num not in invoice.shipments:
+            # create shipment info
+            invoice.shipments[Lead_Shipment_Num] = Shipment()
+            shipment = invoice.shipments[Lead_Shipment_Num]
+            shipment.main_trk_num = Lead_Shipment_Num
+            shipment.cust_id = row["cust_id"]
+            shipment.tran_date= self._parse_date(row["Transaction Date"])
+            shipment.zone = row["Zone"]
+            shipment.ship_ref1 = row["Shipment Reference Number 1"]
+            shipment.ship_ref2 = row["Shipment Reference Number 2"]
+            self._build_location(row, shipment)
+
+        if row["Tracking Number"] in ["", "nan"]:
+            self._build_shipment_cost(row, shipment, invoice)
+        # add/update package info
+        else:
+            self._build_package(row, shipment, invoice)
+
+    def _build_package(self, row: pd.Series, shipment: Shipment):
+        # reminder: when creating a pkg, need to add 1 pkg at shipment lvl
+        pkg_trk_num = row["Tracking Number"]
+        if pkg_trk_num not in shipment.packages:
+            shipment.packages["pkg_trk_num"] = Package()
+            package = shipment.packages["pkg_trk_num"]
+            package.lead_trk_num = shipment.main_trk_num
+            package.trk_num = pkg_trk_num
+
+            package.entered_wgt = row["Entered Weight"]
+            package.billed_wgt = row["Billed Weight"]
+            # add same wgt to shipment lvl:
+            shipment.entered_wgt += row["Entered Weight"]
+            shipment.billed_wgt += row["Billed Weight"]
+
+            package.length = row[""]
+            package.width = row[""]
+            package.height = row[""]
+            # TODO: not complete yet
+            
+
+    def _build_invoice_cost(self, row: pd.Series, invoice: Invoice): 
+        charge_cate = row["Charge_Cate_EN"]
+        ap_amt = row["Net Amount"]
+        ar_amt = row["AR_Amount"]
+        inc_amt = row["Incentive Amount"]
+        if charge_cate not in invoice.inv_charge:
+            invoice.inv_charge[charge_cate] = Charge()
+            invoice_charge_detail = invoice.inv_charge[charge_cate]
+            invoice_charge_detail.inv_num = row["Invoice Number"]
+            invoice_charge_detail.charge_ref1 = row["Miscellaneous Line 1"]
+            invoice_charge_detail.charge_ref2 = row["Miscellaneous Line 2"]
+        invoice_charge_detail = invoice.inv_charge[charge_cate]
+        invoice_charge_detail.inc_amt = inc_amt
+        invoice_charge_detail.ap_amt += ap_amt
+        invoice_charge_detail.ar_amt += ar_amt
+        invoice_charge_detail.inc_amt += inc_amt
+        invoice.ap_amt += ap_amt
+        invoice.ar_amt += ar_amt           
+
+    def _build_shipment_cost(self, row: pd.Series, shipment: Shipment, invoice: Invoice): 
+        # reminder: when adding a charge, need to add same amt at shipment lvl
+        charge_cate = row["Charge_Cate_EN"]
+        ap_amt = row["Net Amount"]
+        ar_amt = row["AR_Amount"]
+        inc_amt = row["Incentive Amount"]
+        if charge_cate not in shipment.shipment_charge:
+            shipment.shipment_charge[charge_cate] = Charge()
+            shipment_charge_detail = shipment.shipment_charge[charge_cate]
+            shipment_charge_detail.inv_num = row["Invoice Number"]
+            shipment_charge_detail.charge_ref1 = row["Miscellaneous Line 1"]
+            shipment_charge_detail.charge_ref2 = row["Miscellaneous Line 2"]
+        shipment_charge_detail = shipment.shipment_charge[charge_cate]
+        shipment_charge_detail.inc_amt = inc_amt
+        shipment_charge_detail.ap_amt += ap_amt
+        shipment_charge_detail.ar_amt += ar_amt
+        shipment_charge_detail.inc_amt += inc_amt
+        shipment.ap_amt += ap_amt
+        shipment.ar_amt += ar_amt
+
+    def _build_package_charge(self, row):
+        # reminder: when adding a charge, need to add same amt at invoice&shipment lvl
+
+    def _build_location(self, row: pd.Series, shipment: Shipment):
+        if shipment.sender.zipcode in ["", "nan"]:
+            addr_sender = shipment.sender
+            addr_sender.company = row["Sender Company Name"]
+            addr_sender.contact = row["Sender Name"]
+            addr_sender.addr1 = row["Sender Address Line 1"]
+            addr_sender.addr2 = row["Sender Address Line 2"]
+            addr_sender.city = row["Sender City"]
+            addr_sender.state = row["Sender State"]
+            addr_sender.zipcode = row["Sender Postal"]
+            addr_sender.country = row["Sender Country"]
+        
+        if shipment.consignee.zipcode in ["", "nan"]:
+            addr_consignee = shipment.consignee
+            addr_consignee.company = row["Receiver Company Name"]
+            addr_consignee.contact = row["Receiver Name"]
+            addr_consignee.addr1 = row["Receiver Address Line 1"]
+            addr_consignee.addr2 = row["Receiver Address Line 2"]
+            addr_consignee.city = row["Receiver City"]
+            addr_consignee.state = row["Receiver State"]
+            addr_consignee.zipcode = row["Receiver Postal"]
+            addr_consignee.country = row["Receiver Country"]
+    
     def get_invoices(self) -> dict[str, Invoice]:
         """Return all constructed Invoice objects."""
         return self.invoices
