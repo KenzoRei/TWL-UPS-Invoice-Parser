@@ -14,11 +14,9 @@ class Location:
         self.contact_email = contact_email
 
 class Charge:
-    def __init__(self, inv_num: str = "", pkg_trk_num: str = "", charge_en: str = "", charge_cn: str = "", 
+    def __init__(self, charge_en: str = "", charge_cn: str = "", 
                  inc_amt: float = 0.0, ap_amt: float = 0.0, ar_amt: float = 0.0, charge_ref1: str = "", 
                  charge_ref2: str = ""):
-        self.inv_num = inv_num
-        self.pkg_trk_num = pkg_trk_num
         self.charge_en = charge_en
         self.charge_cn = charge_cn
         self.inc_amt = inc_amt
@@ -28,11 +26,10 @@ class Charge:
         self.charge_ref2 = charge_ref2
 
 class Package:
-    def __init__(self, lead_trk_num: str = "", trk_num: str = "", entered_wgt: float = 0.0, 
+    def __init__(self, trk_num: str = "", entered_wgt: float = 0.0, 
                  billed_wgt: float = 0.0, length: float = 0.0, width: float = 0.0, height: float = 0.0,
                  ap_amt: float = 0.0, ar_amt: float = 0.0, flag_UPS_SCC: bool = False,
                  pkg_ref1: str = "", pkg_ref2: str = ""):
-        self.lead_trk_num = lead_trk_num
         self.trk_num = trk_num
         self.entered_wgt = entered_wgt
         self.billed_wgt = billed_wgt
