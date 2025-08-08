@@ -3,7 +3,29 @@ from pathlib import Path
 from typing import List
 import pandas as pd
 import numpy as np
+import datetime
 from datetime import timedelta
+from models import Invoice, Shipment, Package, Charge, Location
+import logging
+import pickle
+
+# General costs are cost that will NEVER allocate to any costomer.
+# This is the first priority over all rules
+General_Cost_EN = {
+    "Payment Processing Fee"
+}
+
+# Special Customer for special handlings:
+# 1) full charge of specific accounts are assigned to these customers
+# 2) Exclude from all YDD import tempaltes
+# 3) Total ar amount = total ap amount * index, instead of aggregation of all charges
+# 4) Need split original invoices instead of re-arranged invoices
+SPECIAL_CUSTOMERS = {
+    "F000222": {"accounts": {"H930G2", "H930G3", "H930G4", "R1H015", "XJ3936"}},
+    "F000208": {"accounts": {"HE6132"}},
+}
+SPECIAL_ACCT_TO_CUST = {acct: cust for cust, v in SPECIAL_CUSTOMERS.items() for acct in v["accounts"]}
+SPECIAL_CUSTS = set(SPECIAL_CUSTOMERS.keys())
 
 def is_blank(val) -> bool:
     """
@@ -36,18 +58,6 @@ class UpsInvLoader:
         print("Validating invoice formats...")
         return True
 
-    def extract_basic_info(self):
-        """
-        Extract invoice number, date, or other identifiers.
-        Stores results in self.basic_info.
-        """
-        # TODO: parse metadata from invoices
-        print("Extracting basic invoice information...")
-        self.basic_info = [
-            {"filename": file.name, "InvoiceNumber": "123456", "Date": "2024-06-01"}
-            for file in self.input_dir.glob("*.xlsx")
-        ]
-
     def archive_raw_invoices(self, output_dir: str) -> Path:
         """
         Save raw invoice files to a specified directory.
@@ -61,13 +71,6 @@ class UpsInvLoader:
         
         print(f"Archived raw invoices to {output_path}")
         return output_path
-    
-# How to use:
-# loader = UpsInvLoader("/path/to/loading_folder")
-# if loader.validate_format():
-#     loader.extract_basic_info()
-#     output_dir = loader.archive_raw_invoices("/path/to/archive_folder")
-
 
 class UpsInvNormalizer:
     def __init__(self, file_list: List[Path]):
@@ -130,16 +133,44 @@ class UpsInvNormalizer:
     def load_invoices(self):
         """Load CSV invoice files with correct dtypes and dates."""
         self.raw_dataframes = []
+        tried_encs = ["utf-8", "utf-8-sig", "cp1252", "latin1"]
         for file in self.file_list:
-            df = pd.read_csv(
-                file, 
-                header=None,
-                names=self.all_col_name,
-                dtype=self.dtype_map
+            last_err = None
+            for enc in tried_encs:
+                try:
+                    df = pd.read_csv(
+                        file,
+                        header=None,
+                        names=self.all_col_name,
+                        dtype=self.dtype_map,
+                        encoding=enc,                 # ← try encodings
+                        encoding_errors="strict",     # or "replace" to keep going
+                    )
+                    # success -> stop trying encodings
+                    print(f"✓ Loaded {file.name} with encoding {enc}")
+                    break
+                except UnicodeDecodeError as e:
+                    last_err = e
+                    continue
+            else:
+                # no encoding worked; as a last resort, force replacement
+                df = pd.read_csv(
+                    file,
+                    header=None,
+                    names=self.all_col_name,
+                    dtype=self.dtype_map,
+                    encoding="latin1",
+                    encoding_errors="replace",  # keeps data, replaces bad bytes
                 )
+                print(f"! Loaded {file.name} with latin1 (replacement used)")
+
+            # keep only flagged columns
             df = df.loc[:, self.filtered_col_name]
+
+            # parse date columns safely (mixed formats)
             for date_col in self.date_cols:
-                df[date_col] = pd.to_datetime(df[date_col])
+                df[date_col] = pd.to_datetime(df[date_col], format="mixed", errors="coerce")
+
             self.raw_dataframes.append(df)
 
     def merge_invoices(self):
@@ -192,36 +223,6 @@ class UpsInvNormalizer:
     def get_normalized_data(self) -> pd.DataFrame:
         return self.normalized_df
 
-# How to use:
-# from pathlib import Path
-# from ups_invoice_parser import UpsInvNormalizer
-
-# # Step 1: Gather all invoice files
-# base_path = Path(__file__).resolve().parent
-# invoice_folder = base_path / "data/raw_invoices"
-# output_path = base_path / "output/normalized_output.xlsx"
-# file_list = list(invoice_folder.glob("*.csv"))
-
-# # Step 2: Create the normalizer instance
-# normalizer = UpsInvNormalizer(file_list)
-
-
-# # Step 3: Run normalization steps
-# normalizer.load_invoices()
-# normalizer.merge_invoices()
-# normalizer.standardize_invoices()
-
-# # Step 4: Get and inspect the result
-# df = normalizer.get_normalized_data()
-# print(df.head())  # Print top 5 rows
-# print(df.columns.tolist())  # Print all column names
-# df.to_excel(output_path, index=False)
-
-
-
-# Match normalized UPS invoice with customer ID   
-
-import math 
 class UpsCustomerMatcher:
     def __init__(self, normalized_df: pd.DataFrame):
         """
@@ -234,15 +235,21 @@ class UpsCustomerMatcher:
         self.df["Charge_Cate_CN"] = ""
         self.DEFAULT_CUST_ID = "F000999"
         self.base_path = Path(__file__).resolve().parent
-        self.mapping_cust = self.base_path / "input" / "数据列表.xlsx"               # for cust.id mapping
+        # try to find files starting with "数据列表"
+        cust_files = list((self.base_path / "input").glob("数据列表*.xlsx"))
+        if not cust_files:
+            raise FileNotFoundError("No file starting with '数据列表' found in input directory.")
+        self.mapping_cust = cust_files[0]             # for cust.id mapping
         self.mapping_cust_df = pd.DataFrame()
         self.mapping_pickup = self.base_path / "data" / "mappings" / "Pickups.csv"  # for daily pickup mapping
         self.mapping_pickup_df = pd.DataFrame()
         self.mapping_chrg = self.base_path / "data" / "mappings" / "Charges.csv"    # for charge category mapping
         self.mapping_chrg_df = pd.DataFrame()
         self.mapping_ar = self.base_path / "data" / "mappings" / "ARCalculator.csv" # for ar amount amplifier & modifier flag mapping
-        self.mapping_ar_df = pd.DataFrame() 
+        self.mapping_ar_df = pd.DataFrame()
         self.trk_to_cust = {}
+        # cust.id that will be excluded from exception imports (since they don't need to be preserved in YDD)
+        self.excluded_from_exception = list(SPECIAL_CUSTS)
 
         self._load_mapping()        
 
@@ -289,6 +296,14 @@ class UpsCustomerMatcher:
         }
 
     def match_customers(self):
+
+        # 0) Pre-assign specials by account (highest priority, vectorized)
+        self.df["cust_id"] = self.df["cust_id"].astype(str)
+        self.df["cust_id_special"] = self.df["Account Number"].map(SPECIAL_ACCT_TO_CUST)
+        mask_special = self.df["cust_id_special"].notna()
+        self.df.loc[mask_special, "cust_id"] = self.df.loc[mask_special, "cust_id_special"]
+        self.df.drop(columns=["cust_id_special"], inplace=True)
+
         """
         1. Match and overwrite cust_id and Lead Shipment Number in self.df
         2. Generate YiDiDa import template for unmatched charges
@@ -297,6 +312,7 @@ class UpsCustomerMatcher:
         exception_rows = []
         for idx, row in self.df.iterrows():
             cust_id, lead_shipment = np.nan, np.nan
+            exception_flag = False
 
             # classify charges
             category_en, category_cn = self._charge_classifier(row)
@@ -307,9 +323,9 @@ class UpsCustomerMatcher:
             trk_num = str(row["Tracking Number"])
             if trk_num in self.trk_to_cust:
                 cust_id, lead_shipment = self.trk_to_cust[trk_num]
-            else:
-                exception_rows.append(row.to_dict())
-                cust_id = self._exception_handler(row)
+            else:                
+                cust_id = self._exception_handler(self.df.loc[idx])
+                exception_flag = True               
                 if is_blank(row["Lead Shipment Number"]):
                     lead_shipment = trk_num
                 else:
@@ -320,9 +336,23 @@ class UpsCustomerMatcher:
             self.df.at[idx, "Lead Shipment Number"] = lead_shipment
             if is_blank(row["Tracking Number"]):
                 self.df.at[idx, "Tracking Number"] = lead_shipment
+            if is_blank(self.df.at[idx, "Lead Shipment Number"]) and self.df.at[idx, "cust_id"] != "F000999":
+                lead_shipment = row["Invoice Number"] + "-AcctExpense"
+                self.df.at[idx, "Lead Shipment Number"] = lead_shipment
+                self.df.at[idx, "Tracking Number"] = lead_shipment
+                self.df.at[idx, "Shipment Reference Number 1"] = lead_shipment
+            if exception_flag and not is_blank(row["Lead Shipment Number"]):
+                exception_rows.append(self.df.loc[idx].to_dict())
  
         self._ar_calculator()
         df_exception = pd.DataFrame(exception_rows)
+        num_cols = ["总实重", "长", "宽", "高"]
+        for col in df_exception.columns:
+            if col in num_cols:
+                # Coerce errors to NaN, then fill with 0
+                df_exception[col] = pd.to_numeric(df_exception[col], errors="coerce").fillna(0)
+            else:
+                df_exception[col] = df_exception[col].replace({np.nan: ""}).replace({"nan": ""})
         self._template_generator(df_exception)
 
         # Save all rows with undefined charge categories
@@ -335,18 +365,22 @@ class UpsCustomerMatcher:
     def _exception_handler(self, row: pd.Series) -> str:
         """Manually match a shipment with cust_id and return it."""
 
-        # 0. pass cust_id if it already exists
-        if not is_blank(row["cust_id"]):
+        # 0. General cost 
+        if row["Charge_Cate_EN"] in General_Cost_EN:
+            return self.DEFAULT_CUST_ID
+
+        # 1. pass cust_id if it already exists
+        if not is_blank(row["cust_id"]) and row["cust_id"] != self.DEFAULT_CUST_ID:
             return row["cust_id"]
         
-        # 1. Import department pickup
+        # 2. Import department pickup
         elif (
             row["Lead Shipment Number"].startswith("2") and
             "import" in row["Shipment Reference Number 1"].lower()
         ):
             return "F000223"
 
-        # 2. UPEX (vermilion match)
+        # 3. UPEX (vermilion match)
         elif (
             "vermilion" in row["Sender Name"].lower() or
             "vermilion" in row["Sender Company Name"].lower() or
@@ -354,27 +388,32 @@ class UpsCustomerMatcher:
         ):
             return "F000215"
 
-        # 3. Bondex
+        # 4. Bondex (pickup fee allocates to TWW)
         elif row["Account Number"] in ["K5811C", "F03A44"]:
-            return "F000281"
+            if row["Charge_Cate_EN"] in ["Daily Pickup", "Daily Pickup - Fuel"]:
+                return self.DEFAULT_CUST_ID
+            else:
+                return "F000281"
 
-        # 4. SPT
+        # 5. SPT
         elif row["Account Number"] == "HE6132":
             return "F000208"
 
-        # 5. Transware
+        # 6. Transware
+        elif row["Account Number"] in (["H930G2", "H930G3", "H930G4", "R1H015", "XJ3936"]):
+            return "F000222"
         elif not is_blank(row["Tracking Number"]) or not is_blank(row["Lead Shipment Number"]):
             return "F000222"
 
-        # 6. Daily Pickup logic
+        # 7. Daily Pickup logic
         elif row["Charge_Cate_EN"] in ["Daily Pickup", "Daily Pickup - Fuel"]:
             return self.dict_pickup.get(row["Account Number"], {}).get("Cust.ID", self.DEFAULT_CUST_ID)
 
-        # 7. Generic cost rules
-        elif row["Charge_Cate_EN"] in ["processing fee", "SCC audit fee", "POD fee"]:
+        # 8. Generic cost rules
+        elif row["Charge_Cate_EN"] in ["SCC audit fee", "POD fee"]:
             return self.DEFAULT_CUST_ID
 
-        # 8. Fallback
+        # 9. Fallback
         return self.DEFAULT_CUST_ID
 
     
@@ -424,11 +463,81 @@ class UpsCustomerMatcher:
         return Chrg_EN, Chrg_CN
         
     def _template_generator(self, df: pd.DataFrame):
-        """Generate an YiDiDa template and save is to output folder"""
-        df_exceptions = df
-        # waiting edit
-        
-        
+        """ Generate an YiDiDa template and save is to output folder"""
+        # TODO: finish template generator
+        cols_to_check = ["Lead Shipment Number", "Tracking Number"]
+        condition_missing = df[cols_to_check].apply(lambda row: any(is_blank(val) for val in row), axis=1)
+        condition_exclude = ~df["cust_id"].isin(self.excluded_from_exception)
+        df_exceptions = df[~condition_missing & condition_exclude]
+        df_exceptions = df_exceptions.drop_duplicates(subset=["Lead Shipment Number", "Tracking Number"], keep="first")
+        col_names = ["客户代码", "转单号", "承运商子单号", "客户单号(文本格式)", 
+                     "收货渠道", "目的地国家", "件数", "总实重", "长", "宽", 
+                     "高", "省份/洲名简码", "城市", "邮编", "收件公司", 
+                     "收件人姓名", "收件人电话", "收件人地址一", "收件人地址二", 
+                     "包裹类型", "报关方式", "付税金", "中文品名", "英文品名", 
+                     "海关编码", "数量", "币种", "单价", "总价", "购买保险", 
+                     "寄件人姓名", "寄件公司", "寄件电话", "寄件人地址一", "寄件人地址二", 
+                     "寄件人城市", "寄件人州名", "寄件人国家", "寄件人邮编", 
+                     "货物特性", "收货备注", "预报备注"
+        ]
+        output_template = pd.DataFrame(columns=col_names)
+        output_template["客户代码"] = df_exceptions["cust_id"].fillna("F000999").astype(str)
+        output_template["转单号"] = df_exceptions["Lead Shipment Number"].fillna("UNKNOWN").astype(str)
+        output_template["承运商子单号"] = df_exceptions["Tracking Number"].fillna("UNKNOWN").astype(str)
+        output_template["客户单号(文本格式)"] = (
+            df_exceptions["Shipment Reference Number 1"].fillna("NoRef").astype(str) + "-" +
+            df_exceptions["Lead Shipment Number"].fillna("UNKNOWN").astype(str)
+        ).str[:34]        
+        output_template["收货渠道"] = "UPS Exception Handling"
+        output_template["目的地国家"] = "US"
+        output_template["件数"] = 1
+        output_template["总实重"] = (
+            pd.to_numeric(df_exceptions["Billed Weight"], errors="coerce")
+            .fillna(0)
+            .apply(lambda x: max(x / 2.204, 1))
+        ).round(2)
+        output_template["长"] = (
+            pd.to_numeric(df_exceptions["Billed Length"], errors="coerce")
+            .fillna(0)
+            .apply(lambda x: max(x * 2.56, 1))
+        ).round(2)
+        output_template["宽"] = (
+            pd.to_numeric(df_exceptions["Billed Width"], errors="coerce")
+            .fillna(0)
+            .apply(lambda x: max(x * 2.56, 1))
+        ).round(2)
+        output_template["高"] = (
+            pd.to_numeric(df_exceptions["Billed Height"], errors="coerce")
+            .fillna(0)
+            .apply(lambda x: max(x * 2.56, 1))
+        ).round(2)
+        output_template["省份/洲名简码"] = df_exceptions["Receiver State"].replace("", "CA").astype(str)
+        output_template["城市"] = df_exceptions["Receiver City"].replace("", "UNKNOWN").astype(str)
+        output_template["邮编"] = df_exceptions["Receiver Postal"].replace("", "90248").astype(str)
+        output_template["收件公司"] = df_exceptions["Receiver Company Name"].replace("", "UNKNOWN").astype(str)
+        output_template["收件人姓名"] = df_exceptions["Receiver Name"].replace("", "UNKNOWN").astype(str)
+        output_template["收件人地址一"] = df_exceptions["Receiver Address Line 1"].replace("", "UNKNOWN").astype(str)
+        output_template["收件人地址二"] = df_exceptions["Receiver Address Line 2"].replace("", "UNKNOWN").astype(str)
+        output_template["寄件人姓名"] = df_exceptions["Sender Name"].replace("", "UNKNOWN").astype(str)
+        output_template["寄件公司"] = df_exceptions["Sender Company Name"].replace("", "UNKNOWN").astype(str)
+        output_template["寄件人地址一"] = df_exceptions["Sender Address Line 1"].fillna("UNKNOWN").astype(str)
+        output_template["寄件人地址二"] = df_exceptions["Sender Address Line 2"].replace("", "UNKNOWN").astype(str)
+        output_template["寄件人城市"] = df_exceptions["Sender City"].replace("", "UNKNOWN").astype(str)
+        output_template["寄件人州名"] = df_exceptions["Sender State"].replace("", "CA").astype(str)
+        output_template["寄件人国家"] = "US"
+        output_template["寄件人邮编"] = df_exceptions["Sender Postal"].replace("", "90248").astype(str)
+        output_template["预报备注"] = "ManualImport " + datetime.date.today().strftime("%Y-%m-%d")
+        for col in ["报关方式", "付税金", "中文品名", "英文品名", "海关编码", 
+            "数量", "币种", "单价", "总价", "购买保险", "货物特性", "收货备注"]:
+            output_template[col] = ""
+        if not output_template.empty:
+            output_path = self.base_path / "output" / "ExceptionImport_YDD.xlsx"
+            output_path.parent.mkdir(parents=True, exist_ok=True) 
+            output_template = output_template.fillna("").replace("nan", "")
+            output_template.to_excel(output_path, index=False)
+        print(f"✅ YDD Exception Template generated with {len(output_template)} rows.")
+        print(f"📁 YDD Exception Template Saved to: {output_path}")
+
     def _ar_calculator(self):
         """Calculate ar amount according to cust_id"""
         # verify self.df
@@ -459,33 +568,7 @@ class UpsCustomerMatcher:
 
     def get_matched_data(self) -> pd.DataFrame:
         """Return the updated DataFrame with customer info matched."""
-        return self.df
-    
-# how to use:
-# from ups_invoice_parser import UpsInvNormalizer  # Your existing normalizer class
-# from ups_customer_matcher import UpsCustomerMatcher  # Assuming you put it in new file
-
-# # Get normalized data
-# normalizer = UpsInvNormalizer(file_list)
-# normalizer.load_invoices()
-# normalizer.merge_invoices()
-# normalizer.standardize_invoices()
-# normalized_df = normalizer.get_normalized_data()
-
-# # Create matcher
-# matcher = UpsCustomerMatcher(normalized_df)
-# matcher.match_customers()
-# matched_df = matcher.get_matched_data()
-
-# # Save or inspect
-# matched_df.to_excel("matched_output.xlsx", index=False)
-# print("✅ Matching completed and saved.")
-
-from datetime import datetime
-from models import Invoice, Shipment, Package, Charge, Location
-import logging
-import pickle
-import os
+        return self.df    
 
 class UpsInvoiceBuilder:
     def __init__(self, normalized_df: pd.DataFrame):
@@ -525,7 +608,7 @@ class UpsInvoiceBuilder:
                 invoice.batch_num = invoice.inv_num[-3:]
                 self.invoices[inv_num] = invoice
 
-            # for general invoice cost (don't allocate to costomer)
+            # for general invoice cost
             if is_blank(row["Lead Shipment Number"]):
                 self._build_invoice_cost(row, invoice)
             
@@ -759,7 +842,7 @@ class UpsInvoiceBuilder:
         with open(file_path, "wb") as f:
             pickle.dump(self.invoices, f)
 
-        print(f"✅ Invoices saved to {file_path}")
+        print(f"📁 Invoices saved to {file_path}")
 
     def load_invoices(self, batch_number: str):
         """
@@ -788,70 +871,78 @@ class UpsInvoiceExporter:
     }
 
     def __init__(self, invoices: dict):
-        # Store composite invoices
+        # Store composite (Invoice → Shipment → Package → Charge)
         self.invoices = invoices
-        self.flatten_inv = pd.DataFrame()
+        self.flat_charges = pd.DataFrame()
+        self.flat_packages = pd.DataFrame()
 
-        # Setup output path for batch folder
-        self.output_path = Path(__file__).resolve().parent / "output"
+        # Paths & batch metadata
+        base = Path(__file__).resolve().parent
+        self.output_path = base / "output"
         first_invoice = next(iter(self.invoices.values()))
         self.batch_number = getattr(first_invoice, "batch_num", "unknown_batch")
-        self.inv_date = pd.to_datetime(first_invoice.inv_date)  # ensure datetime
+        self.inv_date = pd.to_datetime(getattr(first_invoice, "inv_date", None)) if getattr(first_invoice, "inv_date", None) else pd.Timestamp.today().normalize()
         self.output_path = self.output_path / self.batch_number
         self.output_path.mkdir(parents=True, exist_ok=True)
+        self.raw_path = base / "data" / "raw_invoices"
 
-        # Load mappings
+        # Mappings
         self._load_mappings()
 
     # ----------------------
     # Mapping loader
     # ----------------------
     def _load_mappings(self):
-        """Load Xero Contacts, InventoryItems, and ARCalculator mapping as DataFrames and dicts."""
+        """Load Xero Contacts and latest InventoryItems (for *ItemCode accounts)."""
         mappings_path = Path(__file__).resolve().parent / "data" / "mappings"
 
-        # === Contacts.csv ===
+        # Contacts.csv
         contacts_file = mappings_path / "Contacts.csv"
         if not contacts_file.exists():
             raise FileNotFoundError(f"❌ Contacts.csv not found in {mappings_path}")
         self.xero_contacts = pd.read_csv(contacts_file, dtype=str).fillna("")
         print(f"✅ Loaded Contacts.csv ({len(self.xero_contacts)} rows)")
 
-        # Build dict keyed by AccountNumber
+        # ARCalculator.csv
+        ARCalculator_file = mappings_path / "ARCalculator.csv"
+        mapping_ar_df = pd.read_csv(ARCalculator_file)
+        self.dict_ar = mapping_ar_df.set_index(mapping_ar_df.columns[0]).to_dict(orient="index")
+
         self.dict_contacts = {}
+        cols = self.xero_contacts.columns
+        contact_name_col = "*ContactName" if "*ContactName" in cols else "ContactName"
         for _, row in self.xero_contacts.iterrows():
-            acct = row["AccountNumber"].strip()
-            contact_name_col = "*ContactName" if "*ContactName" in row else "ContactName"
+            acct = str(row.get("AccountNumber", "")).strip()
             self.dict_contacts[acct] = {
-                "ContactName": row[contact_name_col].strip(),
-                "EmailAddress": row["EmailAddress"].strip(),
+                "ContactName": str(row.get(contact_name_col, "")).strip(),
+                "EmailAddress": str(row.get("EmailAddress", "")).strip(),
                 "POAddress": {
-                    "AttentionTo": row["POAttentionTo"].strip(),
-                    "Line1": row["POAddressLine1"].strip(),
-                    "Line2": row["POAddressLine2"].strip(),
-                    "Line3": row["POAddressLine3"].strip(),
-                    "Line4": row["POAddressLine4"].strip(),
-                    "City": row["POCity"].strip(),
-                    "Region": row["PORegion"].strip(),
-                    "ZipCode": row["POZipCode"].strip(),
-                    "Country": row["POCountry"].strip()
+                    "AttentionTo": str(row.get("POAttentionTo", "")).strip(),
+                    "Line1": str(row.get("POAddressLine1", "")).strip(),
+                    "Line2": str(row.get("POAddressLine2", "")).strip(),
+                    "Line3": str(row.get("POAddressLine3", "")).strip(),
+                    "Line4": str(row.get("POAddressLine4", "")).strip(),
+                    "City": str(row.get("POCity", "")).strip(),
+                    "Region": str(row.get("PORegion", "")).strip(),
+                    "ZipCode": str(row.get("POZipCode", "")).strip(),
+                    "Country": str(row.get("POCountry", "")).strip()
                 },
                 "SAAddress": {
-                    "AttentionTo": row["SAAttentionTo"].strip(),
-                    "Line1": row["SAAddressLine1"].strip(),
-                    "Line2": row["SAAddressLine2"].strip(),
-                    "Line3": row["SAAddressLine3"].strip(),
-                    "Line4": row["SAAddressLine4"].strip(),
-                    "City": row["SACity"].strip(),
-                    "Region": row["SARegion"].strip(),
-                    "ZipCode": row["SAZipCode"].strip(),
-                    "Country": row["SACountry"].strip()
+                    "AttentionTo": str(row.get("SAAttentionTo", "")).strip(),
+                    "Line1": str(row.get("SAAddressLine1", "")).strip(),
+                    "Line2": str(row.get("SAAddressLine2", "")).strip(),
+                    "Line3": str(row.get("SAAddressLine3", "")).strip(),
+                    "Line4": str(row.get("SAAddressLine4", "")).strip(),
+                    "City": str(row.get("SACity", "")).strip(),
+                    "Region": str(row.get("SARegion", "")).strip(),
+                    "ZipCode": str(row.get("SAZipCode", "")).strip(),
+                    "Country": str(row.get("SACountry", "")).strip()
                 },
-                "PhoneNumber": row["PhoneNumber"].strip(),
-                "MobileNumber": row["MobileNumber"].strip()
+                "PhoneNumber": str(row.get("PhoneNumber", "")).strip(),
+                "MobileNumber": str(row.get("MobileNumber", "")).strip()
             }
 
-        # === InventoryItems-YYYYMMDD.csv ===
+        # InventoryItems-*.csv (latest)
         inventory_files = sorted(mappings_path.glob("InventoryItems-*.csv"), reverse=True)
         if not inventory_files:
             raise FileNotFoundError(f"❌ No InventoryItems-*.csv found in {mappings_path}")
@@ -861,54 +952,134 @@ class UpsInvoiceExporter:
 
         self.dict_inventory = {}
         for _, row in self.xero_inventory.iterrows():
-            code = row["*ItemCode"].strip()
+            code = str(row.get("*ItemCode", "")).strip()
             self.dict_inventory[code] = {
-                "ItemName": row["ItemName"].strip(),
-                "PurchasesAccount": row["PurchasesAccount"].strip(),
-                "SalesAccount": row["SalesAccount"].strip()
+                "ItemName": str(row.get("ItemName", "")).strip(),
+                "PurchasesAccount": str(row.get("PurchasesAccount", "")).strip(),
+                "SalesAccount": str(row.get("SalesAccount", "")).strip()
             }
-        
-    # ----------------------
-    # Flatten + ensure numeric
-    # ----------------------
-    def flatten(self) -> pd.DataFrame:
-        rows = []
-        for inv_num, invoice in self.invoices.items():
-            for cate, charge in invoice.inv_charge.items():
-                rows.append(self._build_row(invoice, None, None, cate, charge))
-            for ship_num, shipment in invoice.shipments.items():
-                for cate, charge in shipment.shipment_charge.items():
-                    rows.append(self._build_row(invoice, shipment, None, cate, charge))
-                for pkg_num, package in shipment.packages.items():
-                    for cate, charge in package.charge_detail.items():
-                        rows.append(self._build_row(invoice, shipment, package, cate, charge))
-        return pd.DataFrame(rows)
 
-    def _build_row(self, invoice, shipment, package, cate, charge):
-        return {
-            "Invoice Number": invoice.inv_num,
-            "Account Number": invoice.acct_num,
-            "Lead Shipment Number": shipment.main_trk_num if shipment else "",
-            "Billed Weight": package.billed_wgt if package else "",
-            "Charge_Cate_EN": charge.charge_en,
-            "Charge_Cate_CN": charge.charge_cn,
-            "ap_amt": round(charge.ap_amt, 2),
-            "ar_amt": round(charge.ar_amt, 2),
-            "cust_id": shipment.cust_id if shipment else ""
-        }
+    # ----------------------
+    # One-pass flatten (charges + packages)
+    # ----------------------
+    def _flatten_all_once(self):
+        """Traverse composite ONCE and populate flat_charges & flat_packages."""
+        charge_rows, pkg_rows = [], []
+        c_append, p_append = charge_rows.append, pkg_rows.append
+
+        for invoice in self.invoices.values():
+            inv_num = getattr(invoice, "inv_num", "")
+            inv_date = pd.to_datetime(getattr(invoice, "inv_date", None)) if getattr(invoice, "inv_date", None) else pd.NaT
+            acct_num = getattr(invoice, "acct_num", "")
+
+            # Invoice-level charges
+            for ch in getattr(invoice, "inv_charge", {}).values():
+                c_append({
+                    "Invoice Number": inv_num,
+                    "Invoice Date": inv_date,
+                    "Account Number": acct_num,
+                    "cust_id": "",
+                    "Lead Shipment Number": "",
+                    "Tracking Number": "",
+                    "Charge_Cate_EN": getattr(ch, "charge_en", ""),
+                    "Charge_Cate_CN": getattr(ch, "charge_cn", ""),
+                    "ap_amt": float(getattr(ch, "ap_amt", 0) or 0),
+                    "ar_amt": float(getattr(ch, "ar_amt", 0) or 0),
+                })
+
+            # Shipments (+ shipment charges + packages + package charges)
+            for ship in getattr(invoice, "shipments", {}).values():
+                cust_id = getattr(ship, "cust_id", "")
+                main_trk = getattr(ship, "main_trk_num", "")
+
+                # Shipment-level charges
+                for ch in getattr(ship, "shipment_charge", {}).values():
+                    c_append({
+                        "Invoice Number": inv_num,
+                        "Invoice Date": inv_date,
+                        "Account Number": acct_num,
+                        "cust_id": cust_id,
+                        "Lead Shipment Number": main_trk,
+                        "Tracking Number": main_trk, 
+                        "Charge_Cate_EN": getattr(ch, "charge_en", ""),
+                        "Charge_Cate_CN": getattr(ch, "charge_cn", ""),
+                        "ap_amt": float(getattr(ch, "ap_amt", 0) or 0),
+                        "ar_amt": float(getattr(ch, "ar_amt", 0) or 0),
+                    })
+
+                # Packages (and package-level charges)
+                for pkg in getattr(ship, "packages", {}).values():
+                    # package row for Packages sheet
+                    w_lb = getattr(pkg, "billed_wgt", None)
+                    try:
+                        w_kg = round(float(w_lb) / 2.20462, 2) if w_lb not in (None, "", "nan") else None
+                    except Exception:
+                        w_kg = None
+
+                    def to_cm(v):
+                        try:
+                            return round(float(v) * 2.54, 2)
+                        except Exception:
+                            return None
+
+                    p_append({
+                        "cust_id": cust_id,
+                        "Invoice Number": inv_num,
+                        "Invoice Date": inv_date,
+                        "Lead Shipment Number": main_trk,
+                        "Tracking Number": getattr(pkg, "trk_num", "") or main_trk,
+                        "Billed Weight (kg)": w_kg,
+                        "Length (cm)": to_cm(getattr(pkg, "length", "")),
+                        "Width (cm)":  to_cm(getattr(pkg, "width", "")),
+                        "Height (cm)": to_cm(getattr(pkg, "height", "")),
+                        "Receiver Name":  getattr(ship.consignee, "contact", ""),
+                        "Receiver Company":getattr(ship.consignee, "company", ""),
+                        "Receiver City":  getattr(ship.consignee, "city", ""),
+                        "Receiver State": getattr(ship.consignee, "state", ""),
+                        "Receiver Postal":getattr(ship.consignee, "zipcode", ""),
+                        "Sender Name":    getattr(ship.sender, "contact", ""),
+                        "Sender City":    getattr(ship.sender, "city", ""),
+                        "Sender State":   getattr(ship.sender, "state", ""),
+                        "Sender Postal":  getattr(ship.sender, "zipcode", ""),
+                    })
+
+                    # Package-level charges
+                    for ch in getattr(pkg, "charge_detail", {}).values():
+                        c_append({
+                            "Invoice Number": inv_num,
+                            "Invoice Date": inv_date,
+                            "Account Number": acct_num,
+                            "cust_id": cust_id,
+                            "Lead Shipment Number": main_trk,
+                            "Tracking Number": getattr(pkg, "trk_num", "") or main_trk,
+                            "Charge_Cate_EN": getattr(ch, "charge_en", ""),
+                            "Charge_Cate_CN": getattr(ch, "charge_cn", ""),
+                            "ap_amt": float(getattr(ch, "ap_amt", 0) or 0),
+                            "ar_amt": float(getattr(ch, "ar_amt", 0) or 0),
+                        })
+
+        self.flat_charges = pd.DataFrame(charge_rows)
+        self.flat_packages = pd.DataFrame(pkg_rows)
+
+        if not self.flat_charges.empty:
+            self.flat_charges["ap_amt"] = pd.to_numeric(self.flat_charges["ap_amt"], errors="coerce").fillna(0.0)
+            self.flat_charges["ar_amt"] = pd.to_numeric(self.flat_charges["ar_amt"], errors="coerce").fillna(0.0)
+
+        if not self.flat_packages.empty:
+            for c in ["Billed Weight (kg)", "Length (cm)", "Width (cm)", "Height (cm)"]:
+                if c in self.flat_packages.columns:
+                    self.flat_packages[c] = pd.to_numeric(self.flat_packages[c], errors="coerce")
 
     def _ensure_flattened(self):
-        if self.flatten_inv.empty:
-            self.flatten_inv = self.flatten()
-        self.flatten_inv["ap_amt"] = pd.to_numeric(self.flatten_inv["ap_amt"], errors="coerce").fillna(0)
-        self.flatten_inv["ar_amt"] = pd.to_numeric(self.flatten_inv["ar_amt"], errors="coerce").fillna(0)
+        if self.flat_charges is None or self.flat_charges.empty:
+            self._flatten_all_once()
 
     # ----------------------
-    # Split cost breakdown
+    # Cost splits
     # ----------------------
     def _split_costs(self):
         self._ensure_flattened()
-        df = self.flatten_inv.copy()
+        df = self.flat_charges.copy()
 
         mask_general = df["Lead Shipment Number"].apply(is_blank)
 
@@ -935,68 +1106,251 @@ class UpsInvoiceExporter:
         self.general_cost_df = general_df
         self.customer_cost_df = cust_df
 
+    # ----------------------
+    # Master export
+    # ----------------------
     def export(self):
-        """Export full invoice details and summaries to Excel."""
+        """Export details + summaries to Excel (adds 'Summary for General Cost')."""
         self._ensure_flattened()
-        df = self.flatten_inv.copy()
+        self._split_costs()
+        df = self.flat_charges.copy()
 
         summary_invoice = df.groupby("Invoice Number")[["ap_amt", "ar_amt"]].sum().reset_index()
         summary_customer = df.groupby("cust_id")[["ap_amt", "ar_amt"]].sum().reset_index()
+        for cid in SPECIAL_CUSTOMERS:
+            mask = summary_customer["cust_id"] == cid
+            if mask.any():  # only update if cid exists
+                factor = self.dict_ar.get(cid, {}).get("Factor", 0.0)
+                summary_customer.loc[mask, "ar_amt"] = (
+                    summary_customer.loc[mask, "ap_amt"] * factor
+                ).round(2)
 
         output_file = self.output_path / "UPS_Invoice_Export.xlsx"
         with pd.ExcelWriter(output_file, engine="xlsxwriter") as writer:
             df.to_excel(writer, sheet_name="Details", index=False)
             summary_invoice.to_excel(writer, sheet_name="Summary by Invoice", index=False)
             summary_customer.to_excel(writer, sheet_name="Summary by Customer", index=False)
+            (self.general_cost_df[["Charge_Cate_CN", "ap_amt"]]
+                .rename(columns={"Charge_Cate_CN": "费用类型（中文）", "ap_amt": "总应付金额"})
+                .sort_values("总应付金额", ascending=False)
+                .to_excel(writer, sheet_name="Summary for General Cost", index=False))
+        print(f"📁 UPS invoice export saved to {output_file}")
 
-        print(f"✅ UPS invoice export saved to {output_file}")
-    
+    def _generate_special_customer_invoices(self):
+        tried_encs = ["utf-8", "utf-8-sig", "cp1252", "latin1"]
+        header_path = Path(__file__).resolve().parent / "data" / "mappings" / "OriHeadr.csv"
+        headers = pd.read_csv(header_path)
+        header_list = headers["Column Name"]
+        
+        # build once from flat_packages for speed
+        if self.flat_packages.empty:
+            print("⚠️ No packages to derive keys from.")
+            return
+
+        for cid, meta in SPECIAL_CUSTOMERS.items():
+            acct_codes = set(meta.get("accounts", []))
+
+            # get lead/trk sets for THIS cid from flat_packages
+            sub = self.flat_packages[self.flat_packages["cust_id"] == cid]
+            lead_set = set(sub["Lead Shipment Number"].dropna().astype(str).unique())
+            trk_set  = set(sub["Tracking Number"].dropna().astype(str).unique())
+
+            dfs = []
+
+            for file in self.raw_path.glob("*.csv"):
+                fname = file.name
+
+                # Case 1: whole file belongs to this special by acct code in filename
+                has_acct = any(ac in fname for ac in acct_codes) or any(
+                    len(fname) >= 21 and fname[15:21] == ac for ac in acct_codes
+                )
+
+                # Read raw with no headers for both branches to keep shape consistent
+                df = None
+                for enc in tried_encs:
+                    try:
+                        df = pd.read_csv(file, header=None, dtype=str, encoding=enc, low_memory=False)
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                    except Exception as e:
+                        print(f"⚠️ Could not read {fname} with {enc}: {e}")
+                        break
+                if df is None:
+                    print(f"❌ Skipped {fname}: unable to decode with {tried_encs}")
+                    continue
+
+                if has_acct:
+                    dfs.append(df)
+                    continue
+
+                # Case 2: general invoices — select only rows whose col14/col21 match our keys
+                if df.shape[1] >= 21:
+                    lead_col, trk_col = 13, 20
+                    df.iloc[:, lead_col] = df.iloc[:, lead_col].astype(str).str.strip()
+                    df.iloc[:, trk_col]  = df.iloc[:, trk_col].astype(str).str.strip()
+                    mask = df.iloc[:, lead_col].isin(lead_set) | df.iloc[:, trk_col].isin(trk_set)
+                    sub_rows = df.loc[mask]
+                    if not sub_rows.empty:
+                        dfs.append(sub_rows)
+
+            if not dfs:
+                # nothing matched for this special — skip quietly
+                continue
+
+            combined_inv = pd.concat(dfs, ignore_index=True)
+            output_path = self.output_path / f"RAW_CustomerInvoice_{cid}.csv"
+            combined_inv.to_csv(output_path, header=header_list, index=False)
+            print(f"📁 Customer invoice exported: {output_path}")
+
+    def _generate_general_customer_invoices(self):
+        ar_lines_all = self.flat_charges.copy()
+        ar_lines_all = ar_lines_all[(~ar_lines_all["Lead Shipment Number"].apply(is_blank))]
+        ar_lines_all = ar_lines_all[ar_lines_all["ar_amt"] != 0]
+
+        pkg_all = self.flat_packages.copy()
+
+        cust_ids = sorted(
+            set(ar_lines_all.get("cust_id", pd.Series(dtype=str)).dropna().unique())
+            | set(pkg_all.get("cust_id", pd.Series(dtype=str)).dropna().unique())
+        )
+        
+        # Exclude special customers
+        specials = SPECIAL_CUSTS
+        normal_custs = [c for c in cust_ids if c not in specials]
+
+        for cid in normal_custs:
+            ar_sub = ar_lines_all[ar_lines_all["cust_id"] == cid].copy()
+            pkg_sub = pkg_all[pkg_all["cust_id"] == cid].copy() if not pkg_all.empty else pd.DataFrame()
+
+            # AR Summary
+            if not ar_sub.empty:
+                ar_summary = (
+                    ar_sub.groupby("Charge_Cate_CN", as_index=False)["ar_amt"]
+                    .sum()
+                    .sort_values("ar_amt", ascending=False)
+                    .rename(columns={"Charge_Cate_CN": "费用类型（中文）", "ar_amt": "金额"})
+                )
+                grand_total = round(float(ar_sub["ar_amt"].sum()), 2)
+            else:
+                ar_summary = pd.DataFrame(columns=["费用类型（中文）", "金额"])
+                grand_total = 0.00
+
+            # Cover
+            cover = pd.DataFrame({
+                "Field": ["Customer ID", "Batch Num", "Charge Total"],
+                "Value": [cid, self.batch_number, grand_total],
+            })
+
+            # AR Pivot (detail)
+            # 1. Pivot table
+            pivot_df = ar_sub.pivot_table(
+                index="Tracking Number",
+                columns="Charge_Cate_CN",
+                values="ar_amt",
+                aggfunc="sum",
+                fill_value=0
+            )
+            # 2. Ensure "运费"(transporation fee) is the first column
+            cols = pivot_df.columns.tolist()
+            if "运费" in cols:
+                cols.remove("运费")
+                cols = ["运费"] + cols
+            pivot_df = pivot_df[cols]
+            # 3. Optional: reset index for export
+            pivot_df = pivot_df.reset_index()
+
+            # Write
+            out = self.output_path / f"CustomerInvoice_{cid}.xlsx"
+            with pd.ExcelWriter(out, engine="xlsxwriter") as w:
+                cover.to_excel(w, sheet_name="Invoice", index=False)
+                ar_summary.to_excel(w, sheet_name="AR Summary", index=False)
+                pivot_df.to_excel(w, sheet_name="Charge Pivot", index=False)
+                (pkg_sub if not pkg_sub.empty else pd.DataFrame(columns=["（no packages）"])).to_excel(
+                    w, sheet_name="Packages", index=False
+                )
+            print(f"📁 Customer invoice exported: {out}")
+
+    # ----------------------
+    # Customer invoices (one Excel per customer)
+    # ----------------------
+    def generate_customer_invoices(self):
+        """
+        Create one Excel per customer with:
+          - Invoice (cover: Customer, Batch, AR Total)
+          - AR Summary (by Charge_Cate_CN)
+          - AR Lines   (detail lines, AR only)
+          - Packages   (per-package info)
+        2 groups of customers:
+          - Special customer: total ar amount = total ap amount * factor
+          - General customer: total ar amount = sum(ar charges for each item)
+        """
+        self._ensure_flattened()
+        self._generate_special_customer_invoices()
+        self._generate_general_customer_invoices()
+        
+    def _build_special_keys(self, matched_df: pd.DataFrame, cid: str):
+        '''
+        Build key sets from matched_df
+        Return lead shipment tracking number and pkg tracking number for special customers
+        '''
+        if  cid in SPECIAL_CUSTOMERS:
+            sub = matched_df[matched_df["cust_id"] == cid]
+            lead_nums = set(sub["Lead Shipment Number"].dropna().astype(str).unique())
+            trk_nums  = set(sub["Tracking Number"].dropna().astype(str).unique())
+
+        return lead_nums, trk_nums    
+
     # ----------------------
     # YDD AP Template
     # ----------------------
     def generate_ydd_ap_template(self):
-        """Generate YiDiDa AP template and export as Excel file."""
         self._ensure_flattened()
-        df = self.flatten_inv[~self.flatten_inv["Lead Shipment Number"].apply(is_blank)].copy()
 
-        # Ensure numeric AP amount
+        # Exclude special customers
+        df = self.flat_charges.copy()
+        df = df[~df["cust_id"].isin(SPECIAL_CUSTS)]
+        df = df[~df["Lead Shipment Number"].apply(is_blank)]
+
+        # Use only rows that belong to shipments
+        df = self.flat_charges[~self.flat_charges["Lead Shipment Number"].apply(is_blank)].copy()
         df["ap_amt"] = pd.to_numeric(df["ap_amt"], errors="coerce").fillna(0)
 
-        # Get billed weight in KG per shipment
-        billed_wgt_kg = (
-            pd.to_numeric(df["Billed Weight"], errors="coerce")
-            .groupby(df["Lead Shipment Number"])
-            .max()
-            .apply(lambda w: round(w / 2.204, 2) if pd.notna(w) else "")
-        )
+        # ✅ Get billed weight per shipment from flat_packages (NOT flat_charges)
+        if not self.flat_packages.empty and "Billed Weight (kg)" in self.flat_packages.columns:
+            bw_per_ship = (
+                self.flat_packages
+                .dropna(subset=["Lead Shipment Number"])
+                .groupby("Lead Shipment Number")["Billed Weight (kg)"]
+                # If you want total weight across packages, use .sum() here
+                .max()                 # ← commonly billed weight per shipment is the max
+                .round(2)
+            )
+        else:
+            bw_per_ship = pd.Series(dtype=float)
 
-        # Group AP by customer, shipment, and charge category
+        # Group AP by customer + shipment + charge
         grouped = (
             df.groupby(["cust_id", "Lead Shipment Number", "Charge_Cate_CN"], as_index=False)
             .agg({"ap_amt": "sum"})
         )
 
-        # Add billed weight
-        grouped["代理计费重"] = grouped["Lead Shipment Number"].map(billed_wgt_kg)
+        # ✅ Map billed weight into the grouped rows
+        grouped["代理计费重"] = grouped["Lead Shipment Number"].map(bw_per_ship).fillna("")
 
-        # Rename to match template
+        # Rename + order columns for YDD
         grouped = grouped.rename(columns={
             "cust_id": "客户编号",
             "Lead Shipment Number": "转单号",
             "Charge_Cate_CN": "费用名称",
-            "ap_amt": "金额"
+            "ap_amt": "金额",
         })
-
-        # Round 金额
         grouped["金额"] = grouped["金额"].round(2)
-
-        # Final column order
         grouped = grouped[["客户编号", "转单号", "费用名称", "金额", "代理计费重"]]
 
-        # Save to Excel
         output_file = self.output_path / "YDD_AP_Template.xlsx"
         grouped.to_excel(output_file, index=False)
-        print(f"✅ YiDiDa AP template saved to {output_file}")
+        print(f"📁 YiDiDa AP template saved to {output_file}")
 
     # ----------------------
     # YDD AR Template
@@ -1004,24 +1358,25 @@ class UpsInvoiceExporter:
     def generate_ydd_ar_template(self):
         """Generate YiDiDa AR template and export as Excel file."""
         self._ensure_flattened()
-        df = self.flatten_inv[~self.flatten_inv["Lead Shipment Number"].apply(is_blank)].copy()
 
-        # Ensure numeric AP amount
+        # Exclude special customers
+        df = self.flat_charges.copy()
+        df = df[~df["cust_id"].isin(SPECIAL_CUSTS)]
+        df = df[~df["Lead Shipment Number"].apply(is_blank)]
+
+        df = self.flat_charges[~self.flat_charges["Lead Shipment Number"].apply(is_blank)].copy()
+
         df["ap_amt"] = pd.to_numeric(df["ap_amt"], errors="coerce").fillna(0)
 
-        # Group AP by Lead Shipment Number + Charge Category
         grouped = (
             df.groupby(["Lead Shipment Number", "Charge_Cate_CN", "cust_id"], as_index=False)
             .agg({"ap_amt": "sum"})
         )
-
-        # Round amount
         grouped["ap_amt"] = grouped["ap_amt"].round(2)
 
-        # Build template DataFrame
         ar_df = pd.DataFrame({
             "主提单号/客户单号/系统单号": grouped["Lead Shipment Number"],
-            "子转单号/子系统单号": "",  # blank
+            "子转单号/子系统单号": "",
             "费用名": grouped["Charge_Cate_CN"],
             "金额": grouped["ap_amt"],
             "币种": "USD",
@@ -1033,18 +1388,52 @@ class UpsInvoiceExporter:
             "自动对账": "Y"
         })
 
-        # Save to Excel
         output_file = self.output_path / "YDD_AR_Template.xlsx"
         ar_df.to_excel(output_file, index=False)
-        print(f"✅ YiDiDa AR template saved to {output_file}")
-
+        print(f"📁 YiDiDa AR template saved to {output_file}")
 
     # ----------------------
     # Xero AP Template
     # ----------------------
+    def _split_costs(self):  # keep above for reuse by Xero
+        self._ensure_flattened()
+        df = self.flat_charges.copy()
+
+        mask_general = df["Lead Shipment Number"].apply(is_blank)
+
+        general_df = (
+            df[mask_general]
+            .groupby(["Charge_Cate_CN", "Charge_Cate_EN"], as_index=False)[["ap_amt", "ar_amt"]]
+            .sum()
+        )
+        general_df["*AccountCode"] = general_df["Charge_Cate_EN"].map(self.GENERAL_ITEMCODE_MAP).fillna("7155")
+        general_df["SourceType"] = "general"
+        general_df["*ItemCode"] = ""
+
+        cust_df = (
+            df[~mask_general]
+            .groupby("cust_id", as_index=False)[["ap_amt", "ar_amt"]]
+            .sum()
+        )
+        for cid in SPECIAL_CUSTOMERS:
+            mask = cust_df["cust_id"] == cid
+            if mask.any(): 
+                factor = self.dict_ar.get(cid, {}).get("Factor", 0.0)
+                cust_df.loc[mask, "ar_amt"] = (
+                    cust_df.loc[mask, "ap_amt"] * factor
+                ).round(2)
+
+        cust_df["*ItemCode"] = cust_df["cust_id"].astype(str).str[-4:]
+        cust_df["*AccountCode"] = cust_df["*ItemCode"].map(
+            lambda code: self.dict_inventory.get(code, {}).get("PurchasesAccount", "")
+        )
+        cust_df["SourceType"] = "customer"
+
+        self.general_cost_df = general_df
+        self.customer_cost_df = cust_df
+
     def generate_xero_ap_template(self):
         self._split_costs()
-
         combined_df = pd.concat([self.general_cost_df, self.customer_cost_df], ignore_index=True, sort=False)
 
         combined_df["*ContactName"] = "UPS"
@@ -1069,7 +1458,7 @@ class UpsInvoiceExporter:
         ]
         output_file = self.output_path / "Xero_AP_Template.csv"
         combined_df[final_cols].to_csv(output_file, index=False)
-        print(f"✅ Xero AP template saved to {output_file}")
+        print(f"📁 Xero AP template saved to {output_file}")
 
     # ----------------------
     # Xero AR Template
@@ -1083,9 +1472,8 @@ class UpsInvoiceExporter:
         df["*ContactName"] = df["cust_id"].map(
             lambda cid: self.dict_contacts.get(cid, {}).get("ContactName", "")
         )
-
         today = pd.Timestamp.today().normalize()
-        df["*InvoiceNumber"] = df["cust_id"] + "-" + self.batch_number
+        df["*InvoiceNumber"] = df["cust_id"].astype(str) + "-" + self.batch_number
         df["*InvoiceDate"] = today
         df["*DueDate"] = today + timedelta(days=30)
         df["InventoryItemCode"] = df["*ItemCode"]
@@ -1104,7 +1492,7 @@ class UpsInvoiceExporter:
         ]
         output_file = self.output_path / "Xero_AR_Template.csv"
         df[final_cols].to_csv(output_file, index=False)
-        print(f"✅ Xero AR template saved to {output_file}")
+        print(f"📁 Xero AR template saved to {output_file}")
 
     # ----------------------
     # Combined runner
