@@ -1,5 +1,6 @@
 import shutil
 from pathlib import Path
+import sys
 from typing import List
 import pandas as pd
 import numpy as np
@@ -8,6 +9,8 @@ from datetime import timedelta
 from models import Invoice, Shipment, Package, Charge, Location
 import logging
 import pickle
+import csv
+from utils.file_chooser import FileChooser
 
 # General costs are cost that will NEVER allocate to any costomer.
 # This is the first priority over all rules
@@ -43,34 +46,173 @@ def is_blank(val) -> bool:
             return True
     return False
 
+# -- inside UpsInvLoader --
 class UpsInvLoader:
-    def __init__(self, input_dir: str):
+    def __init__(self, input_dir: str = "."):
         self.input_dir = Path(input_dir)
-        self.invoices = []  # Placeholder for loaded invoice files
-        self.basic_info = []  # List of dicts like {'InvoiceNumber':..., 'Date':...}
+        self.invoices: list[Path] = []
+        self.basic_info: list[dict] = []
+        self.batch_number: str | None = None
+        self._chooser = FileChooser(self.input_dir)
+
+    def choose_files_dialog(self) -> list[Path]:
+        self.invoices = self._chooser.pick_csvs(interactive=True, cli_fallback=True)
+        return self.invoices
+
+    def choose_files_cli(self) -> list[Path]:
+        self.invoices = self._chooser.pick_csvs(interactive=False, cli_fallback=True)
+        return self.invoices
+
+    # --- helper: read the first row as fields (handles quotes/commas) ---
+    def _read_first_row(self, file: Path) -> list[str]:
+        tried_encs = ["utf-8", "utf-8-sig", "cp1252", "latin1"]
+        last_err = None
+        for enc in tried_encs:
+            try:
+                with file.open("r", encoding=enc, newline="") as f:
+                    reader = csv.reader(f)
+                    return next(reader)  # first row only
+            except UnicodeDecodeError as e:
+                last_err = e
+                continue
+            except StopIteration:
+                # empty file
+                return []
+        # fallback with replacement to avoid crash; still try to parse
+        with file.open("r", encoding="latin1", errors="replace", newline="") as f:
+            reader = csv.reader(f)
+            try:
+                return next(reader)
+            except StopIteration:
+                return []
 
     def validate_format(self) -> bool:
         """
-        Validate the format of each file in the input directory.
-        Return True if all pass, False otherwise.
+        Validate all selected CSVs:
+        (1) no header
+        (2) version == '2.1' (fatal)
+        (3) 250 columns
+        (4) acct# len 10, starts '0000'
+        (5) inv# len 15, starts '000000' -> collects batch# (last 3)
+        Additionally: ALL files must share the SAME batch number.
+        (6) inv amount numeric      
         """
-        # TODO: implement format checking logic
-        print("Validating invoice formats...")
-        return True
+        if not self.invoices:
+            logging.warning("No files selected for validation.")
+            return False
 
-    def archive_raw_invoices(self, output_dir: str) -> Path:
-        """
-        Save raw invoice files to a specified directory.
-        Returns the path to the archived folder.
-        """
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
+        all_valid = True
+        batch_seen: str | None = None
 
-        for file in self.input_dir.glob("*.xlsx"):
-            shutil.copy(file, output_path / file.name)
-        
-        print(f"Archived raw invoices to {output_path}")
-        return output_path
+        for file in self.invoices:
+            row = self._read_first_row(file)
+            fname = file.name
+
+            if not row:
+                logging.warning(f"[{fname}] Empty file or unreadable first row.")
+                all_valid = False
+                continue
+
+            # (1) header check (heuristic)
+            v_raw = row[0].strip() if len(row) >= 1 else ""
+            try:
+                float(v_raw)
+            except ValueError:
+                logging.warning(f"[{fname}] Header detected or invalid version field '{v_raw}'. Files must NOT have a header.")
+                all_valid = False
+
+            # (2) version must be exactly 2.1
+            if v_raw != "2.1":
+                logging.error(f"[{fname}] Invoice output version must be '2.1', got '{v_raw}'.")
+                all_valid = False
+                # no need to check further for this file
+                continue
+
+            # (3) 250 columns
+            if len(row) != 250:
+                logging.warning(f"[{fname}] Column count expected 250, got {len(row)}.")
+                all_valid = False  # treat as fail
+
+            # (4) account number format
+            acct = row[2].strip() if len(row) >= 3 else ""
+            if not (len(acct) == 10 and acct.startswith("0000")):
+                logging.warning(f"[{fname}] Account number format invalid: '{acct}' (expect 10 chars starting with '0000').")
+                all_valid = False
+
+            # (5) invoice number format + batch# extraction
+            inv = row[5].strip() if len(row) >= 6 else ""
+            if not (len(inv) == 15 and inv.startswith("000000")):
+                logging.warning(f"[{fname}] Invoice number format invalid: '{inv}' (expect 15 chars starting with '000000').")
+                all_valid = False
+            else:
+                bn = inv[-3:]  # proposed batch number
+                if batch_seen is None:
+                    batch_seen = bn
+                elif bn != batch_seen:
+                    logging.error(f"[{fname}] Batch number '{bn}' differs from previous '{batch_seen}'. All invoices must be in the SAME batch.")
+                    all_valid = False
+
+            # (6) invoice amount numeric
+            inv_amt_raw = row[10].strip() if len(row) >= 11 else ""
+            try:
+                float(inv_amt_raw.replace(",", ""))
+            except ValueError:
+                logging.warning(f"[{fname}] Invoice amount (11th field) not numeric: '{inv_amt_raw}'.")
+                all_valid = False
+
+        # Only set self.batch_number if validation passed and we saw one
+        if all_valid and batch_seen is not None:
+            self.batch_number = batch_seen
+        else:
+            self.batch_number = None
+
+        return all_valid
+
+    def archive_raw_invoices(self) -> None:
+        """
+        Archive all selected CSV files into:
+            <project_root>/data/raw_invoices[/<batch_number>]
+        """
+        if not self.invoices:
+            raise ValueError("No files selected to archive. Run choose_files_dialog() first.")
+
+        base_path = Path(__file__).resolve().parent / "data" / "raw_invoices"
+        out_path = base_path / str(self.batch_number) if self.batch_number else base_path
+        out_path.mkdir(parents=True, exist_ok=True)
+
+        for file in self.invoices:
+            shutil.copy(file, out_path / file.name)
+
+        print(f"📁 Archived {len(self.invoices)} files to {out_path}")
+    
+    def run_import(
+        self,
+        *,
+        interactive: bool = True,
+        cli_fallback: bool = True
+    ) -> None:
+        """
+        1) choose files (dialog/CLI)
+        2) validate (fails if strict=True and any check fails)
+        3) archive to data/raw_invoices[/batch]
+        """
+        # 1) choose
+        if interactive:
+            try:
+                self.choose_files_dialog()
+            except Exception:
+                if not cli_fallback:
+                    raise
+                self.choose_files_cli()
+        if not self.invoices:
+            raise ValueError("No CSV files selected.")
+
+        # 2) validate
+        if not self.validate_format():
+            raise ValueError("Validation failed; see logs.")
+
+        # 3) archive
+        self.archive_raw_invoices()
 
 class UpsInvNormalizer:
     def __init__(self, file_list: List[Path]):
@@ -129,6 +271,31 @@ class UpsInvNormalizer:
             ))
         self.filtered_col_name = self.headers.loc[self.headers['Flag'] == 1,'Column Name'].tolist()
         self.date_cols = self.headers.loc[mask_date, 'Column Name'].tolist()
+    
+    def _save_trk_nums(self):
+        out_path = Path(__file__).resolve().parent / "output"
+        out_path.mkdir(parents=True, exist_ok=True)
+        out_file = out_path / "trk_nums.csv"
+
+        # setup account list for special customers
+        special_cust_acct = [
+            acct
+            for cust in SPECIAL_CUSTOMERS.values()
+            for acct in cust["accounts"]
+            ]
+
+        # filter all unique tracking numbers
+        mask_trk_num = ~self.normalized_df["Account Number"].isin(special_cust_acct)
+        trk_num = (
+            self.normalized_df.loc[mask_trk_num, "Tracking Number"]
+            .dropna()
+            .astype(str)
+            .str.strip()
+            .loc[lambda s: s != ""]
+            .drop_duplicates()
+            .sort_values()
+        )
+        trk_num.to_csv(out_file, index=False)
 
     def load_invoices(self):
         """Load CSV invoice files with correct dtypes and dates."""
@@ -219,83 +386,126 @@ class UpsInvNormalizer:
         df.insert(charge_idx + 1, 'Charge_Cate_CN', '')
 
         self.normalized_df = df
+        self._save_trk_nums()
 
     def get_normalized_data(self) -> pd.DataFrame:
         return self.normalized_df
 
 class UpsCustomerMatcher:
-    def __init__(self, normalized_df: pd.DataFrame):
+    def __init__(self, normalized_df: pd.DataFrame, mapping_file: Path | None = None):
         """
         :param normalized_df: DataFrame output from normalizer.get_normalized_data()
+        :param mapping_file:  Optional path to 数据列表*.xlsx; can be chosen later via choose_mapping_file_dialog()
         """
         self.df = normalized_df.copy()  # Keep original safe
-        if "cust_id" not in self.df.columns: # Add empty column if not exist
+        if "cust_id" not in self.df.columns:  # Add empty column if not exist
             self.df["cust_id"] = ""
         self.df["Charge_Cate_EN"] = ""
         self.df["Charge_Cate_CN"] = ""
         self.DEFAULT_CUST_ID = "F000999"
+
         self.base_path = Path(__file__).resolve().parent
-        # try to find files starting with "数据列表"
-        cust_files = list((self.base_path / "input").glob("数据列表*.xlsx"))
-        if not cust_files:
-            raise FileNotFoundError("No file starting with '数据列表' found in input directory.")
-        self.mapping_cust = cust_files[0]             # for cust.id mapping
+
+        # --- single mapping file (user-provided) ---
+        self.mapping_file: Path | None = mapping_file
         self.mapping_cust_df = pd.DataFrame()
-        self.mapping_pickup = self.base_path / "data" / "mappings" / "Pickups.csv"  # for daily pickup mapping
+
+        # Other mapping paths (unchanged)
+        self.mapping_pickup = self.base_path / "data" / "mappings" / "Pickups.csv"   # for daily pickup mapping
         self.mapping_pickup_df = pd.DataFrame()
-        self.mapping_chrg = self.base_path / "data" / "mappings" / "Charges.csv"    # for charge category mapping
+        self.mapping_chrg = self.base_path / "data" / "mappings" / "Charges.csv"     # for charge category mapping
         self.mapping_chrg_df = pd.DataFrame()
-        self.mapping_ar = self.base_path / "data" / "mappings" / "ARCalculator.csv" # for ar amount amplifier & modifier flag mapping
+        self.mapping_ar = self.base_path / "data" / "mappings" / "ARCalculator.csv"  # for ar amount amplifier & modifier flag
         self.mapping_ar_df = pd.DataFrame()
-        self.trk_to_cust = {}
+
+        # Lookup dicts
+        self.trk_to_cust: dict[str, tuple[str, str]] = {}
+        self.dict_chrg = {}
+        self.dict_pickup = {}
+        self.dict_ar = {}
+
         # cust.id that will be excluded from exception imports (since they don't need to be preserved in YDD)
         self.excluded_from_exception = list(SPECIAL_CUSTS)
 
-        self._load_mapping()        
+        # NOTE: we no longer auto-load here, because the user might not have produced the file yet.
+        # Call choose_mapping_file_dialog() or set_mapping_file(), then match_customers() will load.
 
-    def _load_mapping(self):
+    # -------- file selection (single file) --------
+    def set_mapping_file(self, path: Path) -> None:
+        """Programmatically set the 数据列表*.xlsx path."""
+        self.mapping_file = Path(path) if path else None
 
-        # Load 数据列表.xlsx into self.mapping_cust_df. and flatten it into dict self.trk_to_cust
-        self.mapping_cust_df = pd.read_excel(self.mapping_cust)
+    def choose_mapping_file_dialog(self) -> Path | None:
+        """Let the user pick exactly one mapping file via GUI."""
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+        except Exception as e:
+            raise RuntimeError("tkinter is not available for file selection.") from e
+
+        root = tk.Tk(); root.withdraw()
+        file_path = filedialog.askopenfilename(
+            title="Select mapping file (数据列表*.xlsx)",
+            filetypes=[("Excel files", "*.xlsx *.xls")],
+        )
+        root.update(); root.destroy()
+
+        self.mapping_file = Path(file_path) if file_path else None
+        return self.mapping_file
+
+    # -------- loading mapping assets --------
+    def _load_mapping(self) -> None:
+        """Load all mappings. Requires self.mapping_file to be set."""
+        if self.mapping_file is None:
+            raise FileNotFoundError(
+                "Mapping file not set. Call choose_mapping_file_dialog() or set_mapping_file(Path)."
+            )
+
+        # 1) Load 数据列表*.xlsx into self.mapping_cust_df and build trk→(客户编号, 转单号)
+        self.mapping_cust_df = pd.read_excel(self.mapping_file)
         required_cols = {"子转单号", "客户编号", "转单号"}
-        if not required_cols.issubset(set(self.mapping_cust_df.columns)):
-            raise ValueError(f"Mapping file missing required columns: {required_cols}")
+        if not required_cols.issubset(self.mapping_cust_df.columns):
+            missing = required_cols - set(self.mapping_cust_df.columns)
+            raise ValueError(f"Mapping file missing required columns: {missing}")
         self._build_lookup_dict()
-        
-        # Load Charges.csv into dict self.dict_chrg     
+
+        # 2) Charges.csv → dict
         self.mapping_chrg_df = pd.read_csv(self.mapping_chrg)
+        # Assumes first column is the key (Charge Description)
         self.dict_chrg = self.mapping_chrg_df.set_index(self.mapping_chrg_df.columns[0]).to_dict(orient="index")
 
-        # Load Pickups.csv into dict self.dict_pickup
+        # 3) Pickups.csv → dict
         self.mapping_pickup_df = pd.read_csv(self.mapping_pickup)
         self.dict_pickup = self.mapping_pickup_df.set_index(self.mapping_pickup_df.columns[0]).to_dict(orient="index")
 
-        # Load ARCalculator.csv into dict self.dict_ar
+        # 4) ARCalculator.csv → dict
         self.mapping_ar_df = pd.read_csv(self.mapping_ar)
         self.dict_ar = self.mapping_ar_df.set_index(self.mapping_ar_df.columns[0]).to_dict(orient="index")
 
-    def _build_lookup_dict(self):
-        """Flatten mapping and build dictionary: {Tracking Number: (客户编号, 转单号)}."""
-        mapping_records = []
+    def _build_lookup_dict(self) -> None:
+        """Flatten mapping and build dictionary: {Tracking Number: (客户编号, 转单号)} using vectorized explode."""
+        df = self.mapping_cust_df.copy()
+        # Split "子转单号" by comma into multiple rows
+        df["子转单号"] = (
+            df["子转单号"]
+            .astype(str)
+            .str.replace("[", "", regex=False)
+            .str.replace("]", "", regex=False)
+        )
+        df = df.assign(Tracking=df["子转单号"].str.split(",")).explode("Tracking")
+        df["Tracking"] = df["Tracking"].astype(str).str.replace(" ", "", regex=False)
+        df = df[df["Tracking"] != ""]  # drop blanks
 
-        for _, row in self.mapping_cust_df.iterrows():
-            sub_trks = str(row["子转单号"]).split(",")
-            for trk in sub_trks:
-                cleaned_trk = trk.replace(" ", "").replace("[", "").replace("]", "")
-                if cleaned_trk:
-                    mapping_records.append({
-                        "Tracking Number": cleaned_trk,
-                        "客户编号": row["客户编号"],
-                        "转单号": row["转单号"]
-                    })
+        self.trk_to_cust = dict(
+            zip(df["Tracking"], zip(df["客户编号"].astype(str), df["转单号"].astype(str)))
+        )
 
-        flat_df = pd.DataFrame(mapping_records)
-        self.trk_to_cust = {
-            row["Tracking Number"]: (row["客户编号"], row["转单号"])
-            for _, row in flat_df.iterrows()
-        }
-
-    def match_customers(self):
+    # -------- main workflow --------
+    def match_customers(self) -> None:
+        """Run classification, matching, AR calculation, exception template, and unmapped charge logging."""
+        # Ensure mappings are loaded (user may have chosen the file just now)
+        if not self.trk_to_cust or not self.dict_chrg or not self.dict_pickup or not self.dict_ar:
+            self._load_mapping()
 
         # 0) Pre-assign specials by account (highest priority, vectorized)
         self.df["cust_id"] = self.df["cust_id"].astype(str)
@@ -323,33 +533,32 @@ class UpsCustomerMatcher:
             trk_num = str(row["Tracking Number"])
             if trk_num in self.trk_to_cust:
                 cust_id, lead_shipment = self.trk_to_cust[trk_num]
-            else:                
+            else:
                 cust_id = self._exception_handler(self.df.loc[idx])
-                exception_flag = True               
-                if is_blank(row["Lead Shipment Number"]):
-                    lead_shipment = trk_num
-                else:
-                    lead_shipment = row["Lead Shipment Number"]
-                # other possible handlings
+                exception_flag = True
+                lead_shipment = row["Lead Shipment Number"] if not is_blank(row["Lead Shipment Number"]) else trk_num
+
             self.df.at[idx, "cust_id"] = cust_id
             # REMINDER: overwrite lead shipment# and trk# may lead to info loss!!
             self.df.at[idx, "Lead Shipment Number"] = lead_shipment
             if is_blank(row["Tracking Number"]):
                 self.df.at[idx, "Tracking Number"] = lead_shipment
             if is_blank(self.df.at[idx, "Lead Shipment Number"]) and self.df.at[idx, "cust_id"] != "F000999":
-                lead_shipment = row["Invoice Number"] + "-AcctExpense"
-                self.df.at[idx, "Lead Shipment Number"] = lead_shipment
-                self.df.at[idx, "Tracking Number"] = lead_shipment
-                self.df.at[idx, "Shipment Reference Number 1"] = lead_shipment
+                ls = row["Invoice Number"] + "-AcctExpense"
+                self.df.at[idx, "Lead Shipment Number"] = ls
+                self.df.at[idx, "Tracking Number"] = ls
+                self.df.at[idx, "Shipment Reference Number 1"] = ls
+
             if exception_flag and not is_blank(row["Lead Shipment Number"]):
                 exception_rows.append(self.df.loc[idx].to_dict())
- 
+
         self._ar_calculator()
+
+        # Exception template
         df_exception = pd.DataFrame(exception_rows)
         num_cols = ["总实重", "长", "宽", "高"]
         for col in df_exception.columns:
             if col in num_cols:
-                # Coerce errors to NaN, then fill with 0
                 df_exception[col] = pd.to_numeric(df_exception[col], errors="coerce").fillna(0)
             else:
                 df_exception[col] = df_exception[col].replace({np.nan: ""}).replace({"nan": ""})
@@ -359,7 +568,7 @@ class UpsCustomerMatcher:
         unmapped_charges = self.df[self.df["Charge_Cate_EN"] == "Not Defined Charge"]
         if not unmapped_charges.empty:
             output_path = self.base_path / "output" / "UnmappedCharges.xlsx"
-            output_path.parent.mkdir(parents=True, exist_ok=True)  # Ensure folder exists
+            output_path.parent.mkdir(parents=True, exist_ok=True)
             unmapped_charges.to_excel(output_path, index=False)
 
     def _exception_handler(self, row: pd.Series) -> str:
@@ -410,7 +619,7 @@ class UpsCustomerMatcher:
             return self.dict_pickup.get(row["Account Number"], {}).get("Cust.ID", self.DEFAULT_CUST_ID)
 
         # 8. Generic cost rules
-        elif row["Charge_Cate_EN"] in ["SCC audit fee", "POD fee"]:
+        elif str(row["Charge_Cate_EN"]).upper() in ["SCC AUDIT FEE", "POD FEE"]:
             return self.DEFAULT_CUST_ID
 
         # 9. Fallback
@@ -817,7 +1026,11 @@ class UpsInvoiceBuilder:
                 # Add the SCC fee at package level
                 pkg_scc_charge.ap_amt += self.scc_unit_charge
                 pkg_scc_charge.ar_amt += self.scc_unit_charge
-                
+
+                # Adjust SCC fee at shipment level
+                shipment.ap_amt += self.scc_unit_charge
+                shipment.ar_amt += self.scc_unit_charge
+
     def save_invoices(self):
         """
         Save the composite invoice structure to a .pkl file inside:
@@ -1077,7 +1290,7 @@ class UpsInvoiceExporter:
     # ----------------------
     # Cost splits
     # ----------------------
-    def _split_costs(self):
+    def _split_costs(self):  # keep above for reuse by Xero
         self._ensure_flattened()
         df = self.flat_charges.copy()
 
@@ -1097,6 +1310,14 @@ class UpsInvoiceExporter:
             .groupby("cust_id", as_index=False)[["ap_amt", "ar_amt"]]
             .sum()
         )
+        for cid in SPECIAL_CUSTOMERS:
+            mask = cust_df["cust_id"] == cid
+            if mask.any(): 
+                factor = self.dict_ar.get(cid, {}).get("Factor", 0.0)
+                cust_df.loc[mask, "ar_amt"] = (
+                    cust_df.loc[mask, "ap_amt"] * factor
+                ).round(2)
+
         cust_df["*ItemCode"] = cust_df["cust_id"].astype(str).str[-4:]
         cust_df["*AccountCode"] = cust_df["*ItemCode"].map(
             lambda code: self.dict_inventory.get(code, {}).get("PurchasesAccount", "")
@@ -1140,7 +1361,7 @@ class UpsInvoiceExporter:
         tried_encs = ["utf-8", "utf-8-sig", "cp1252", "latin1"]
         header_path = Path(__file__).resolve().parent / "data" / "mappings" / "OriHeadr.csv"
         headers = pd.read_csv(header_path)
-        header_list = headers["Column Name"]
+        header_list = headers["Column Name"].tolist()
         
         # build once from flat_packages for speed
         if self.flat_packages.empty:
@@ -1312,8 +1533,6 @@ class UpsInvoiceExporter:
         df = df[~df["cust_id"].isin(SPECIAL_CUSTS)]
         df = df[~df["Lead Shipment Number"].apply(is_blank)]
 
-        # Use only rows that belong to shipments
-        df = self.flat_charges[~self.flat_charges["Lead Shipment Number"].apply(is_blank)].copy()
         df["ap_amt"] = pd.to_numeric(df["ap_amt"], errors="coerce").fillna(0)
 
         # ✅ Get billed weight per shipment from flat_packages (NOT flat_charges)
@@ -1364,21 +1583,19 @@ class UpsInvoiceExporter:
         df = df[~df["cust_id"].isin(SPECIAL_CUSTS)]
         df = df[~df["Lead Shipment Number"].apply(is_blank)]
 
-        df = self.flat_charges[~self.flat_charges["Lead Shipment Number"].apply(is_blank)].copy()
-
-        df["ap_amt"] = pd.to_numeric(df["ap_amt"], errors="coerce").fillna(0)
+        df["ar_amt"] = pd.to_numeric(df["ar_amt"], errors="coerce").fillna(0)
 
         grouped = (
             df.groupby(["Lead Shipment Number", "Charge_Cate_CN", "cust_id"], as_index=False)
-            .agg({"ap_amt": "sum"})
+            .agg({"ar_amt": "sum"})
         )
-        grouped["ap_amt"] = grouped["ap_amt"].round(2)
+        grouped["ar_amt"] = grouped["ar_amt"].round(2)
 
         ar_df = pd.DataFrame({
             "主提单号/客户单号/系统单号": grouped["Lead Shipment Number"],
             "子转单号/子系统单号": "",
             "费用名": grouped["Charge_Cate_CN"],
-            "金额": grouped["ap_amt"],
+            "金额": grouped["ar_amt"],
             "币种": "USD",
             "结算单位代码": grouped["cust_id"],
             "内部备注": "",
@@ -1395,43 +1612,6 @@ class UpsInvoiceExporter:
     # ----------------------
     # Xero AP Template
     # ----------------------
-    def _split_costs(self):  # keep above for reuse by Xero
-        self._ensure_flattened()
-        df = self.flat_charges.copy()
-
-        mask_general = df["Lead Shipment Number"].apply(is_blank)
-
-        general_df = (
-            df[mask_general]
-            .groupby(["Charge_Cate_CN", "Charge_Cate_EN"], as_index=False)[["ap_amt", "ar_amt"]]
-            .sum()
-        )
-        general_df["*AccountCode"] = general_df["Charge_Cate_EN"].map(self.GENERAL_ITEMCODE_MAP).fillna("7155")
-        general_df["SourceType"] = "general"
-        general_df["*ItemCode"] = ""
-
-        cust_df = (
-            df[~mask_general]
-            .groupby("cust_id", as_index=False)[["ap_amt", "ar_amt"]]
-            .sum()
-        )
-        for cid in SPECIAL_CUSTOMERS:
-            mask = cust_df["cust_id"] == cid
-            if mask.any(): 
-                factor = self.dict_ar.get(cid, {}).get("Factor", 0.0)
-                cust_df.loc[mask, "ar_amt"] = (
-                    cust_df.loc[mask, "ap_amt"] * factor
-                ).round(2)
-
-        cust_df["*ItemCode"] = cust_df["cust_id"].astype(str).str[-4:]
-        cust_df["*AccountCode"] = cust_df["*ItemCode"].map(
-            lambda code: self.dict_inventory.get(code, {}).get("PurchasesAccount", "")
-        )
-        cust_df["SourceType"] = "customer"
-
-        self.general_cost_df = general_df
-        self.customer_cost_df = cust_df
-
     def generate_xero_ap_template(self):
         self._split_costs()
         combined_df = pd.concat([self.general_cost_df, self.customer_cost_df], ignore_index=True, sort=False)

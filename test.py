@@ -1,93 +1,129 @@
 from pathlib import Path
-import sys
-import pandas as pd
+import sys, pandas as pd, traceback
 from ups_invoice_parser import (
-    UpsInvNormalizer,
-    UpsCustomerMatcher,
-    UpsInvoiceBuilder,
-    UpsInvoiceExporter,   # refactored exporter with single-pass flatten + per-customer invoices
+    UpsInvLoader, UpsInvNormalizer, UpsCustomerMatcher,
+    UpsInvoiceBuilder, UpsInvoiceExporter,
 )
+from contextlib import contextmanager
+from time import perf_counter
+
+out_path = Path(__file__).resolve().parent / "output"
+out_path.parent.mkdir(parents=True, exist_ok=True)
+
+class StepTimer:
+    def __init__(self):
+        self.durations = {}   # {label: seconds}
+        self._stack = []      # for nested timing if needed
+
+    @contextmanager
+    def timeit(self, label: str):
+        start = perf_counter()
+        self._stack.append(label)
+        try:
+            yield
+        finally:
+            elapsed = perf_counter() - start
+            self.durations[label] = self.durations.get(label, 0.0) + elapsed
+            self._stack.pop()
+
+    def print_summary(self, title: str = "⏱️ Runtime summary"):
+        width = max((len(k) for k in self.durations), default=10)
+        print("\n" + title)
+        print("-" * (width + 14))
+        for k, v in self.durations.items():
+            print(f"{k.ljust(width)} : {v:8.3f}s")
 
 def main():
-    # === 1) Setup paths ===
-    base_path = Path(__file__).resolve().parent
-    invoice_folder = base_path / "data" / "raw_invoices"
-    if not invoice_folder.exists():
-        raise FileNotFoundError(f"Invoice folder not found: {invoice_folder}")
+    t = StepTimer()
 
-    file_list = sorted(invoice_folder.glob("*.csv"))
-    if not file_list:
-        print(f"⚠️ No CSV files found in {invoice_folder}. Nothing to do.")
-        return
+    # === 1) Select + validate + archive ===
+    with t.timeit("1) import (select/validate/archive)"):
+        loader = UpsInvLoader()
+        loader.run_import(interactive=True, cli_fallback=False)  # strict by design
+        file_list = loader.invoices
+        print(f"📥 Selected {len(file_list)} CSV file(s)")
 
     # === 2) Normalize invoices ===
-    normalizer = UpsInvNormalizer(file_list)
-    normalizer.load_invoices()
-    normalizer.merge_invoices()
-    normalizer.standardize_invoices()
-    normalized_df = normalizer.get_normalized_data()
-    print(f"✅ Normalized {len(normalized_df)} rows from {len(file_list)} invoice files")
-
-    # ✅ Save normalized data for manual inspection
-    # normalized_outfile = base_path / "output" / "normalized_df.xlsx"
-    # normalized_df.to_excel(normalized_outfile, index=False)
-    # print(f"📁 Normalized DataFrame saved to {normalized_outfile}")
+    with t.timeit("2) normalize"):
+        normalizer = UpsInvNormalizer(file_list)
+        normalizer.load_invoices()
+        normalizer.merge_invoices()
+        normalizer.standardize_invoices()
+        normalized_df = normalizer.get_normalized_data()
+        print(f"✅ Normalized {len(normalized_df)} rows from {len(file_list)} files")
 
     # === 3) Match customers & classify charges ===
-    matcher = UpsCustomerMatcher(normalized_df)
-    matcher.match_customers()
-    matched_df = matcher.get_matched_data()
-    print(f"✅ Matching complete — {matched_df['cust_id'].nunique()} unique customers found")
+    with t.timeit("3) match & classify"):
+        matcher = UpsCustomerMatcher(normalized_df)
+        # Let the user choose exactly one 数据列表*.xlsx
+        mapping_path = matcher.choose_mapping_file_dialog()
+        if not mapping_path:
+            raise RuntimeError("No mapping file selected.")
+        matcher.match_customers()
+        matched_df = matcher.get_matched_data()
+        print(f"✅ Matching complete — {matched_df['cust_id'].nunique()} unique customers")
 
-    # (Optional) quick sanity checks
-    if matched_df["cust_id"].isna().any():
-        na_cnt = matched_df["cust_id"].isna().sum()
-        print(f"⚠️ {na_cnt} rows still have NaN cust_id")
-
-    # ✅ Save matched data for manual inspection
-    # matched_outfile = base_path / "output" / "matched_df.xlsx"
-    # matched_df.to_excel(matched_outfile, index=False)
-    # print(f"📁 Matched & Classified DataFrame saved to {matched_outfile}")
+        # Better unmatched check (NaN or "")
+        unassigned_mask = matched_df["cust_id"].isna() | (matched_df["cust_id"].astype(str).str.strip() == "")
+        if unassigned_mask.any():
+            print(f"⚠️ {unassigned_mask.sum()} rows still have blank/NaN cust_id")
 
     # === 4) Build composite invoice structure ===
-    builder = UpsInvoiceBuilder(matched_df)
-    builder.build_invoices()
-    builder._scc_handler()  # SCC fee allocation (your existing step)
-    invoices_dict = builder.get_invoices()
-    print(f"✅ Built {len(invoices_dict)} Invoice objects")
+    with t.timeit("4) build invoices + SCC"):
+        builder = UpsInvoiceBuilder(matched_df)
+        builder.build_invoices()
+        builder._scc_handler()  # redistribute SCC fee
+        invoices_dict = builder.get_invoices()
+        if not invoices_dict:
+            raise RuntimeError("No Invoice objects were built — check earlier steps.")
+        print(f"✅ Built {len(invoices_dict)} Invoice objects")
 
     # === 5) Save invoices (.pkl) ===
-    builder.save_invoices()
+    with t.timeit("5) save invoices (.pkl)"):
+        builder.save_invoices()
 
-    # === 6) Reload from .pkl to confirm ===
-    first_invoice = next(iter(invoices_dict.values()))
-    batch_number = first_invoice.batch_num
-    reload_builder = UpsInvoiceBuilder(pd.DataFrame())  # empty init is fine for reload
-    reload_builder.load_invoices(batch_number)
-    print(f"✅ Reloaded {len(reload_builder.invoices)} invoices from saved file")
+    # === 6) Reload from .pkl ===
+    with t.timeit("6) reload invoices (.pkl)"):
+        first_invoice = next(iter(invoices_dict.values()))
+        batch_number = getattr(first_invoice, "batch_num", None) or getattr(loader, "batch_number", None)
+        if not batch_number:
+            raise RuntimeError("Batch number not available (from invoice or loader).")
+        reload_builder = UpsInvoiceBuilder(pd.DataFrame())  # empty init is fine for reload
+        reload_builder.load_invoices(batch_number)
+        print(f"✅ Reloaded {len(reload_builder.invoices)} invoices from saved file")
 
-    # === 7) Initialize exporter (refactored: single-pass flatten inside) ===
-    exporter = UpsInvoiceExporter(invoices=reload_builder.invoices)
+    # === 7) Initialize exporter ===
+    with t.timeit("7) init exporter"):
+        exporter = UpsInvoiceExporter(invoices=reload_builder.invoices)
 
-    # === 8) Master export (Details + Summaries + General Cost sheet) ===
-    exporter.export()
+    # === 8) Master export (Details + Summaries + General Cost) ===
+    with t.timeit("8) master export"):
+        exporter.export()
 
-    # === 9) Generate YiDiDa templates (AP + AR) ===
-    exporter.generate_ydd_ap_template()
-    exporter.generate_ydd_ar_template()
+    # === 9) YiDiDa templates (AP + AR) ===
+    with t.timeit("9) YDD AP"):
+        exporter.generate_ydd_ap_template()
+    with t.timeit("10) YDD AR"):
+        exporter.generate_ydd_ar_template()
 
-    # === 10) Generate Xero templates (AP + AR) ===
-    exporter.generate_xero_templates()
+    # === 10) Xero templates (AP + AR) ===
+    with t.timeit("11) Xero templates"):
+        exporter.generate_xero_templates()
 
-    # === 11) One Excel per customer (Invoice / AR Summary / AR Lines / Packages) ===
-    exporter.generate_customer_invoices()
+    # === 11) Per-customer workbooks ===
+    with t.timeit("12) per-customer workbooks"):
+        exporter.generate_customer_invoices()
 
     print(f"✅ All exports completed for batch {batch_number}")
     print(f"📁 Output folder: {(Path(__file__).resolve().parent / 'output' / batch_number)}")
+
+    # === Summary ===
+    t.print_summary()
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
         print(f"❌ Error: {e}", file=sys.stderr)
+        traceback.print_exc()
         raise
