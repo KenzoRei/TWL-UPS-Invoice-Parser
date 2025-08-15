@@ -9,6 +9,8 @@ from time import perf_counter
 
 out_path = Path(__file__).resolve().parent / "output"
 out_path.parent.mkdir(parents=True, exist_ok=True)
+FLAG_API_MATCHUP = True
+CNT_THREAD = 3
 
 class StepTimer:
     def __init__(self):
@@ -50,17 +52,26 @@ def main():
         normalizer.merge_invoices()
         normalizer.standardize_invoices()
         normalized_df = normalizer.get_normalized_data()
+        # normalized_df.to_excel(out_path / "Normalized_Invoices.xlsx", index=False)
         print(f"✅ Normalized {len(normalized_df)} rows from {len(file_list)} files")
 
     # === 3) Match customers & classify charges ===
     with t.timeit("3) match & classify"):
-        matcher = UpsCustomerMatcher(normalized_df)
-        # Let the user choose exactly one 数据列表*.xlsx
-        mapping_path = matcher.choose_mapping_file_dialog()
-        if not mapping_path:
-            raise RuntimeError("No mapping file selected.")
-        matcher.match_customers()
-        matched_df = matcher.get_matched_data()
+        if FLAG_API_MATCHUP:
+            matcher = UpsCustomerMatcher(normalized_df, use_api=True, ydd_threads=CNT_THREAD)
+            matcher.match_customers()
+            if CNT_THREAD>1:
+                matched_df = matcher.get_matched_data()
+        else:
+            matcher = UpsCustomerMatcher(normalized_df)
+            # Let the user choose exactly one 数据列表*.xlsx
+            mapping_path = matcher.choose_mapping_file_dialog()
+            if not mapping_path:
+                raise RuntimeError("No mapping file selected.")
+            matcher.match_customers()
+            matched_df = matcher.get_matched_data()
+        matched_df.to_excel(out_path / "Matched_Invoices.xlsx", index=False)
+        print(f"mapping_pickup: {matcher.dict_pickup}")
         print(f"✅ Matching complete — {matched_df['cust_id'].nunique()} unique customers")
 
         # Better unmatched check (NaN or "")
