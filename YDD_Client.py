@@ -52,7 +52,7 @@ class YDDClient:
         r.raise_for_status()
         return r.json()
 
-    # ---- business: query 运单详情 by 客户单号(支持10个/次) ----
+    # ---- business: query shiment info by order number(10 pkgs/batch) ----
     def query_yundan_detail(self, danhaos: Iterable[str], *, batch_size: int = 10, sleep: float = 0.05) -> List[dict]:
         """Returns concatenated 'data' arrays across batches."""
         # Ensure we’re authenticated

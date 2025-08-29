@@ -1,25 +1,28 @@
 from __future__ import annotations
 
-import shutil
-from pathlib import Path
-import sys
-from typing import List
-import pandas as pd
-import numpy as np
-import datetime
-from datetime import timedelta
-from models import Invoice, Shipment, Package, Charge, Location
-import logging
-import pickle
+# Standard library
 import csv
-from utils.file_chooser import FileChooser
+import datetime
+import logging
 import os
-from typing import Optional
-import os, csv, random, time
-from pathlib import Path
-from typing import Optional, List, Dict, Tuple
-import requests
+import pickle
+import random
+import shutil
+import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import timedelta
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+# Third-party
+import numpy as np
+import pandas as pd
+import requests
+
+# Local application
+from models import Invoice, Shipment, Package, Charge, Location
+from utils.file_chooser import FileChooser
 
 # General costs are cost that will NEVER allocate to any costomer.
 # This is the first priority over all rules
@@ -33,7 +36,7 @@ General_Cost_EN = {
 # 3) Total ar amount = total ap amount * index, instead of aggregation of all charges
 # 4) Need split original invoices instead of re-arranged invoices
 SPECIAL_CUSTOMERS = {
-    "F000222": {"accounts": {"H930G2", "H930G3", "H930G4", "R1H015", "XJ3936"}},
+    "F000222": {"accounts": {"H930G2", "H930G3", "H930G4", "R1H015", "XJ3936", "Y209J6", "Y215B9"}},
     "F000208": {"accounts": {"HE6132"}},
 }
 SPECIAL_ACCT_TO_CUST = {acct: cust for cust, v in SPECIAL_CUSTOMERS.items() for acct in v["accounts"]}
@@ -497,7 +500,7 @@ class UpsCustomerMatcher:
         self.api_cache_path = self.base_path / "output" / "ydd_ref_map.csv"
 
         # exception export
-        self.excluded_from_exception = list(SPECIAL_CUSTS)
+        self.excluded_from_exception = list(SPECIAL_ACCT_TO_CUST)
 
         self.api_stats: dict = {}
 
@@ -767,11 +770,14 @@ class UpsCustomerMatcher:
             # classify charges
             category_en, category_cn = self._charge_classifier(row)
             self.df.at[idx, "Charge_Cate_EN"] = category_en
+            row["Charge_Cate_EN"] = category_en
             self.df.at[idx, "Charge_Cate_CN"] = category_cn
+            row["Charge_Cate_CN"] = category_cn
 
             # HARD RULE: general costs never go to customers
             if category_en in General_Cost_EN:
                 self.df.at[idx, "cust_id"] = self.DEFAULT_CUST_ID
+                row["cust_id"] = self.DEFAULT_CUST_ID
                 # keep it as invoice-level cost: do NOT invent a lead shipment number
                 # and do not backfill tracking
                 continue
@@ -873,11 +879,9 @@ class UpsCustomerMatcher:
             return "F000215"
 
         # 4. Bondex (pickup fee allocates to TWW)
-        elif row["Account Number"] in ["K5811C", "F03A44"]:
-            if row["Charge_Cate_EN"] in ["Daily Pickup", "Daily Pickup - Fuel"]:
-                return self.DEFAULT_CUST_ID
-            else:
-                return "F000281"
+        elif row["Account Number"] in ["K5811C", "F03A44"] and \
+            row["Charge_Cate_EN"] not in ["Daily Pickup", "Daily Pickup - Fuel"]:
+            return "F000281"
 
         # 5. SPT
         elif row["Account Number"] == "HE6132":
@@ -900,7 +904,7 @@ class UpsCustomerMatcher:
         # 9. Fallback
         print(f"account number: {row['Account Number']}")
         print(f"Charge_Cate_EN: {row['Charge_Cate_EN']}")
-        print(f"Api->danhao not found -> pass all exception handlings: {row['Charge Description']}")
+        print(f"pass all exception handlings. 'Charge Description':{row['Charge Description']}, 'Charge_Cate_EN':{row['Charge_Cate_EN']}, 'Amount':{row['Net Amount']}")
         return self.DEFAULT_CUST_ID
 
     
@@ -954,7 +958,7 @@ class UpsCustomerMatcher:
         # TODO: finish template generator
         cols_to_check = ["Lead Shipment Number", "Tracking Number"]
         condition_missing = df[cols_to_check].apply(lambda row: any(is_blank(val) for val in row), axis=1)
-        condition_exclude = ~df["cust_id"].isin(self.excluded_from_exception)
+        condition_exclude = ~df["Account Number"].isin(self.excluded_from_exception)
         df_exceptions = df[~condition_missing & condition_exclude]
         df_exceptions = df_exceptions.drop_duplicates(subset=["Lead Shipment Number", "Tracking Number"], keep="first")
         col_names = ["客户代码", "转单号", "承运商子单号", "客户单号(文本格式)", 

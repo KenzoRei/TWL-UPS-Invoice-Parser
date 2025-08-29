@@ -1,0 +1,51 @@
+*ItemCode,ItemName,Quantity,PurchasesDescription,PurchasesUnitPrice,PurchasesAccount,PurchasesTaxRate,SalesDescription,SalesUnitPrice,SalesAccount,SalesTaxRate,InventoryAssetAccount,CostOfGoodsSoldAccount,Status,InventoryType
+0998,UPS SCC Audit Fee,,UPS SCC Audit Fee,0.00,7152,,UPS SCC Audit Fee,1.65,1299,Tax Exempt,,,Active,Untracked
+9999,Bad Debit,,,,,,Write-off for uncollectible invoice,0.00,6900,Tax Exempt,,,Active,Untracked
+2002,Warehouse - TOM,,Warehouse service,0.00,,,Warehouse service,0.00,,Tax on Sales,,,Active,Untracked
+2001,Warehouse - TWF,,Warehouse - TWF,0.00,5096,,Warehouse - TWF,0.00,8000,Tax on Sales,,,Active,Untracked
+2000,FedEx,,FedEx,0.00,5094,,FedEx,0.00,1298,Tax on Sales,,,Active,Untracked
+1999,UPS MI-In Dispute,,UPS MI Labels,0.00,5099,,,,,,,,Active,Untracked
+1264,UPS MI-Magic Custom,,UPS MI Labels-Magic Custom,0.00,5032,,UPS MI Labels-Magic Custom,0.00,1232,Tax Exempt,,,Active,Untracked
+1263,UPS MI-Axon US,,UPS MI Labels,0.00,5025,,UPS MI Labels,0.00,1225,Tax Exempt,,,Active,Untracked
+1242,UPS MI-ShenZhouXing,,UPS MI Labels,0.00,5018,,UPS MI Labels,0.00,1218,Tax Exempt,,,Active,Untracked
+1228,UPS MI-TimeStar,,UPS MI Labels,0.00,5017,,UPS MI Labels,0.00,1217,Tax Exempt,,,Active,Untracked
+1227,UPS MI-zwineasy,,UPS MI Labels,0.00,5010,,UPS MI Labels,0.00,1210,Tax Exempt,,,Active,Untracked
+1217,UPS MI-S10 Logistics,,UPS MI Labels,0.00,5019,,UPS MI Labels,0.00,1219,Tax Exempt,,,Active,Untracked
+1213,UPS MI-King Kong A,,UPS MI Labels,0.00,5011,,UPS MI Labels,0.00,1211,Tax Exempt,,,Active,Untracked
+1202,UPS MI-Sampro,,UPS MI Labels,0.00,5012,,UPS MI Labels,0.00,1212,Tax Exempt,,,Active,Untracked
+1199,UPS MI-Wish Shipping,,UPS MI Labels,0.00,5015,,UPS MI Labels,0.00,1215,Tax Exempt,,,Active,Untracked
+1000,UPS MI Service,,UPS MI Service,0.00,,,,,,,,,Active,Untracked
+0999,UPS-In Dispute,,UPS labels,0.00,5098,,,,,,,,Active,Untracked
+0281,Haptrans Holdings USA i/o Bondex,,Haptrans Holdings USA i/o Bondex,0.00,5038,,UPS Labels,0.00,1237,Tax on Sales,,,Active,Untracked
+0280,UPS-American Bote,,UPS-American Bote,0.00,5036,,UPS-American Bote,0.00,1236,Tax on Sales,,,Active,Untracked
+0278,UPS-King Kong B,,UPS Labels-King Kong,0.00,5034,,UPS Labels-King Kong,0.00,1234,Tax Exempt,,,Active,Untracked
+0277,UPS-Oslie International,,UPS Labels-Oslie International,0.00,5033,,UPS Labels-Oslie International,0.00,1233,Tax Exempt,,,Active,Untracked
+0276,UPS-Yu Express,,UPS Labels,0.00,5030,,UPS Labels,0.00,1230,Tax Exempt,,,Active,Untracked
+0275,UPS-Bingo Icloud,,UPS Labels,0.00,5031,,UPS Labels,0.00,1231,Tax Exempt,,,Active,Untracked
+0274,UPS Nature Collection,,UPS Labels,0.00,5028,,UPS Labels,0.00,1228,Tax on Sales,,,Active,Untracked
+0272,WPC INTL,,UPS Labels Cost,0.00,5041,,UPS Labels Sales,0.00,1240,Tax on Sales,,,Active,Untracked
+0270,UPS-Newbealer,,UPS Labels,0.00,5026,,UPS Labels,0.00,1226,Tax on Sales,,,Active,Untracked
+0269,UPS-Sureline,,UPS Labels-Sureline,0.00,5035,,UPS Labels-Sureline,0.00,1235,Tax Exempt,,,Active,Untracked
+0264,UPS-Magic Custom,,UPS Labels,0.00,5029,,UPS Labels,0.00,1229,Tax Exempt,,,Active,Untracked
+0263,UPS-Axon,,UPS Labels,0.00,5039,,UPS Ground Labels Sales,0.00,1238,Tax on Sales,,,Active,Untracked
+0257,GQ Warehouse LLC,,UPS LABEL-GQ,0.00,5040,,UPS LABEL-GQ,0.00,1239,Tax on Sales,,,Active,Untracked
+0253,UPS-STARTING,,UPS Labels,0.00,5042,,UPS Labels,0.00,1241,Tax on Sales,,,Active,Untracked
+0251,UPS-BFE,,UPS Labels,0.00,5022,,UPS Labels,0.00,1222,Tax Exempt,,,Active,Untracked
+0248,UPS-Sunyou-B,,UPS Labels,0.00,5027,,UPS Labels,0.00,1227,Tax on Sales,,,Active,Untracked
+0236,UPS-YunDaExpress,,UPS Labels,0.00,5016,,UPS Labels,0.00,1216,Tax Exempt,,,Active,Untracked
+0229,UPS-Sunyou,,UPS Labels,0.00,5013,,UPS Labels,0.00,1213,Tax Exempt,,,Active,Untracked
+0227,UPS-zwineasy,,UPS Labels,0.00,5021,,UPS Labels,0.00,1221,Tax Exempt,,,Active,Untracked
+0225,UPS-70Miles,,UPS Labels,0.00,5014,,UPS Labels,0.00,1214,Tax Exempt,,,Active,Untracked
+0223,UPS-TWF,,UPS Labels,0.00,5006,,UPS Labels,0.00,1206,Tax Exempt,,,Active,Untracked
+0222,UPS-Transware,,UPS Labels,0.00,5005,,UPS Labels,0.00,1205,Tax Exempt,,,Active,Untracked
+0221,UPS-Individual,,UPS Labels,0.00,5007,,UPS Labels,0.00,1207,Tax Exempt,,,Active,Untracked
+0220,UPS-Far International,,UPS Labels,0.00,5009,,UPS Labels,0.00,1209,Tax Exempt,,,Active,Untracked
+0217,UPS-S10 Logistics,,UPS Labels,0.00,5004,,UPS Labels,0.00,1204,Tax Exempt,,,Active,Untracked
+0216,UPS-BaoGuoShipping,,UPS Labels,0.00,5008,,UPS Labels,0.00,1208,Tax Exempt,,,Active,Untracked
+0215,UPS-UPEX,,UPS Labels,0.00,5002,,UPS Labels,0.00,1202,Tax Exempt,,,Active,Untracked
+0213,UPS-King Kong A,,UPS-King Kong A,0.00,5037,,UPS-King Kong A,0.00,0213,Tax on Sales,,,Active,Untracked
+0211,UPS-Ominiway,,UPS Labels,0.00,5020,,UPS Labels,0.00,1220,Tax Exempt,,,Active,Untracked
+0208,UPS-SUNPENTOWN,,UPS Labels,0.00,5003,,UPS Labels,0.00,1203,Tax Exempt,,,Active,Untracked
+0202,UPS-Sampro,,UPS Labels,0.00,5023,,UPS Labels,0.00,1223,Tax Exempt,,,Active,Untracked
+0199,UPS-Wish Shipping,,UPS Labels,0.00,5024,,UPS Labels,0.00,1224,Tax Exempt,,,Active,Untracked
+0000,UPS Service,,UPS Service,0.00,,,,,,,,,Active,Untracked
