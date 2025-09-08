@@ -447,7 +447,7 @@ class UpsCustomerMatcher:
         *,
         use_api: bool = FLAG_API_USE,
         ydd_threads: int = 1,         # 1 = sequential; >1 enables parallel
-        ydd_batch_size: int = 10,     # API limit is 10
+        ydd_batch_size: int = 9,      # API limit is 10
         ydd_client: Optional[object] = None,
         use_cache: bool = True,       # optional on-disk cache for API mapping
     ):
@@ -603,7 +603,7 @@ class UpsCustomerMatcher:
     @staticmethod
     def _query_concurrent(
         client, danhaos: List[str], *, batch_size: int, workers: int,
-        max_retries: int = 4, base_sleep: float = 0.25, jitter: float = 0.15
+        max_retries: int = 6, base_sleep: float = 0.5, jitter: float = 0.3
     ) -> List[dict]:
         """
         Parallel /queryYunDanDetail with per-thread Session and retry/backoff.
@@ -658,16 +658,40 @@ class UpsCustomerMatcher:
         return out
 
     def _load_api_cache(self) -> Dict[str, Tuple[str, str]]:
-        if not self.use_cache: return {}
-        if not self.api_cache_path.exists(): return {}
-        df = pd.read_csv(self.api_cache_path)
+        if not self.use_cache:
+            return {}
+        p = self.api_cache_path
+        try:
+            if not p.exists() or p.stat().st_size == 0:
+                return {}
+        except Exception:
+            return {}
+
+        try:
+            df = pd.read_csv(p)
+        except pd.errors.EmptyDataError:
+            logging.warning(f"[YDD] Cache file is empty: {p}; ignoring.")
+            return {}
+        except Exception as e:
+            logging.warning(f"[YDD] Failed to read cache {p}: {e}; ignoring.")
+            return {}
+
+        required = {"danHao", "cust_id", "tracking"}
+        if not required.issubset(df.columns):
+            logging.warning(f"[YDD] Cache missing columns {required - set(df.columns)}; ignoring.")
+            return {}
+
         return {str(r["danHao"]): (str(r["cust_id"]), str(r["tracking"])) for _, r in df.iterrows()}
 
     def _save_api_cache(self, ref_to_cust: Dict[str, Tuple[str, str]]) -> None:
-        if not self.use_cache: return
+        if not self.use_cache:
+            return
         self.api_cache_path.parent.mkdir(parents=True, exist_ok=True)
         rows = [{"danHao": k, "cust_id": v[0], "tracking": v[1]} for k, v in ref_to_cust.items()]
-        pd.DataFrame(rows).to_csv(self.api_cache_path, index=False, encoding="utf-8-sig")
+        df = pd.DataFrame(rows)
+        tmp = self.api_cache_path.with_suffix(".tmp")
+        df.to_csv(tmp, index=False, encoding="utf-8-sig")
+        tmp.replace(self.api_cache_path)
 
     def _load_mapping_api(self) -> None:
         from YDD_Client import build_ref_to_cust  # danHao -> (cust_id, transfer_no)
@@ -705,10 +729,16 @@ class UpsCustomerMatcher:
                         to_query, batch_size=min(self.ydd_batch_size, 10), sleep=0.01
                     )
             ref2api = build_ref_to_cust(api_items)  # danHao -> (cust_id, transfer_no)
-            # normalize to (cust_id, chosen_tracking)
+            # Output raw API mapping for debugging
+            # print(f"ref2api contents: {ref2api}")
+            # pd.DataFrame([
+            #     {"danhao": k, "cust_id": v[0], "transfer_no": v[1]}
+            #     for k, v in ref2api.items()
+            # ]).to_excel(self.base_path / "output" / "ref2api_check.xlsx", index=False)
+            # normalize to (cust_id, transfer_no) -- always use API's transfer_no
             fresh_ref_to_cust = {
-                ref: (cid, ref_to_best_trk.get(ref, ""))
-                for ref, (cid, _xfer) in ref2api.items()
+                ref: (cid, xfer)  # use API's transfer_no directly
+                for ref, (cid, xfer) in ref2api.items()
             }
             cached.update(fresh_ref_to_cust)
         except Exception as e:
@@ -748,6 +778,10 @@ class UpsCustomerMatcher:
             self._load_mapping_api()
         else:
             self._load_mapping_manual()
+        # pd.DataFrame([
+        #     {"danhao": k, "cust_id": v[0], "lead_shipment": v[1]}
+        #     for k, v in self.ref_to_cust.items()
+        # ]).to_excel("output/ref_to_cust_check.xlsx", index=False)
 
     # ---------------- main workflow ----------------
     def match_customers(self) -> None:
@@ -874,7 +908,9 @@ class UpsCustomerMatcher:
         elif (
             "vermilion" in row["Sender Name"].lower() or
             "vermilion" in row["Sender Company Name"].lower() or
-            "vermilion" in row["Shipment Reference Number 1"].lower()
+            "vermilion" in row["Shipment Reference Number 1"].lower() or
+            "yuzhao liu" in row["Sender Name"].lower() or
+            "yuzhao liu" in row["Sender Company Name"].lower()
         ):
             return "F000215"
 
@@ -897,6 +933,11 @@ class UpsCustomerMatcher:
         elif row["Charge_Cate_EN"] in ["Daily Pickup", "Daily Pickup - Fuel"]:
             return self.dict_pickup.get(row["Account Number"], {}).get("Cust.ID", self.DEFAULT_CUST_ID)
 
+        # # 8. TWW
+        # elif row["Sender Company Name"].lower() == "tww" or \
+        #     row["Sender Company Name"].lower() == "twnj":
+        #     return "F000299"
+        
         # 8. Generic cost rules
         elif str(row["Charge_Cate_EN"]).upper() in ["SCC AUDIT FEE", "POD FEE"]:
             return self.DEFAULT_CUST_ID
@@ -922,7 +963,8 @@ class UpsCustomerMatcher:
             "Void ",
             "Shipping Charge Correction ",
             " Adjustment",
-            "ZONE ADJUSTMENT "
+            "ZONE ADJUSTMENT ",
+            "Returns "
             ]:
             ChrgDesc = ChrgDesc.replace(term, "")
         
@@ -1171,9 +1213,12 @@ class UpsInvoiceBuilder:
             shipment.entered_wgt += row["Entered Weight"]
             shipment.billed_wgt += row["Billed Weight"]
 
-            package.length = row["Billed Length"]
-            package.width = row["Billed Width"]
-            package.height = row["Billed Height"]
+            def _nn(v):
+                return None if pd.isna(v) else v
+
+            package.length = _nn(row["Billed Length"])
+            package.width  = _nn(row["Billed Width"])
+            package.height = _nn(row["Billed Height"])
 
             package.pkg_ref1 = row["Package Reference Number 1"]
             package.pkg_ref2 = row["Package Reference Number 2"]
@@ -1454,6 +1499,24 @@ class UpsInvoiceExporter:
                 "SalesAccount": str(row.get("SalesAccount", "")).strip()
             }
 
+    # helper that blanks out missing values and formats integers nicely(explicit for Dim)
+    @staticmethod
+    def _fmt_inch(v):
+        try:
+            f = float(v)
+            if np.isnan(f) or f == 0:
+                return ""       # treat 0/NaN as missing
+            return str(int(f)) if f.is_integer() else f"{f:.1f}"
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _fmt_inch_triplet(L, W, H):
+        a = UpsInvoiceExporter._fmt_inch(L)
+        b = UpsInvoiceExporter._fmt_inch(W)
+        c = UpsInvoiceExporter._fmt_inch(H)
+        return f"{a}x {b}x {c}" if a and b and c else ""
+
     # ----------------------
     # One-pass flatten (charges + packages)
     # ----------------------
@@ -1499,12 +1562,12 @@ class UpsInvoiceExporter:
                         "Charge_Cate_EN": getattr(ch, "charge_en", ""),
                         "Charge_Cate_CN": getattr(ch, "charge_cn", ""),
                         "ap_amt": float(getattr(ch, "ap_amt", 0) or 0),
-                        "ar_amt": float(getattr(ch, "ar_amt", 0) or 0),
+                        "ar_amt": float(getattr(ch, "ar_amt", 0) or 0),                        
                     })
 
-                # Packages (and package-level charges)
+                # Packages (and package-level charges)# Packages (and package-level charges)
                 for pkg in getattr(ship, "packages", {}).values():
-                    # package row for Packages sheet
+                    # weights
                     w_lb = getattr(pkg, "billed_wgt", None)
                     try:
                         w_kg = round(float(w_lb) / 2.20462, 2) if w_lb not in (None, "", "nan") else None
@@ -1517,28 +1580,47 @@ class UpsInvoiceExporter:
                         except Exception:
                             return None
 
+                    L, W, H = getattr(pkg, "length", None), getattr(pkg, "width", None), getattr(pkg, "height", None)
+                    bill_dim = self._fmt_inch_triplet(L, W, H)
+
                     p_append({
                         "cust_id": cust_id,
                         "Invoice Number": inv_num,
                         "Invoice Date": inv_date,
                         "Lead Shipment Number": main_trk,
                         "Tracking Number": getattr(pkg, "trk_num", "") or main_trk,
-                        "Shipment Reference": getattr(ship, "ship_ref1", ""),
-                        "Pacakge Reference": getattr(pkg, "pkg_ref1", ""),
-                        "Zone": getattr(ship, "zone", ""),
+                        "Billed Weight": w_lb,
                         "Billed Weight (kg)": w_kg,
+                        "Entered Dim": "",
                         "Length (cm)": to_cm(getattr(pkg, "length", "")),
                         "Width (cm)":  to_cm(getattr(pkg, "width", "")),
                         "Height (cm)": to_cm(getattr(pkg, "height", "")),
-                        "Receiver Name":  getattr(ship.consignee, "contact", ""),
-                        "Receiver Company":getattr(ship.consignee, "company", ""),
-                        "Receiver City":  getattr(ship.consignee, "city", ""),
-                        "Receiver State": getattr(ship.consignee, "state", ""),
-                        "Receiver Postal":getattr(ship.consignee, "zipcode", ""),
+                        "Bill Dim": bill_dim, 
+                        "Sender Postal Ref":  getattr(ship.sender, "zipcode", ""),
+                        "Receiver Postal Ref": getattr(ship.consignee, "zipcode", ""),
+                        "Zone": getattr(ship, "zone", ""),
+                        "Comm/Res": "",
+                        "TrsDt": getattr(ship, "tran_date", ""), 
+                        "Ref1": getattr(ship, "ship_ref1", ""),
+                        "Ref2": getattr(ship, "ship_ref2", ""),
+                        "PkgID1": getattr(pkg, "pkg_ref1", ""),
+                        "PkgID2": getattr(pkg, "pkg_ref2", ""),
                         "Sender Name":    getattr(ship.sender, "contact", ""),
+                        "Sender Company Name": getattr(ship.sender, "company", ""),
+                        "Sender Address Line 1": getattr(ship.sender, "addr1", ""),
+                        "Sender Address Line 2": getattr(ship.sender, "addr2", ""),
                         "Sender City":    getattr(ship.sender, "city", ""),
                         "Sender State":   getattr(ship.sender, "state", ""),
                         "Sender Postal":  getattr(ship.sender, "zipcode", ""),
+                        "Sender Country": getattr(ship.sender, "country", ""),
+                        "Receiver Name":  getattr(ship.consignee, "contact", ""),
+                        "Receiver Company": getattr(ship.consignee, "company", ""),
+                        "Receiver Address Line 1": getattr(ship.consignee, "addr1", ""),
+                        "Receiver Address Line 2": getattr(ship.consignee, "addr2", ""),
+                        "Receiver City":  getattr(ship.consignee, "city", ""),
+                        "Receiver State": getattr(ship.consignee, "state", ""),
+                        "Receiver Postal": getattr(ship.consignee, "zipcode", ""),
+                        "Receiver Country": getattr(ship.consignee, "country", ""),
                     })
 
                     # Package-level charges
@@ -1567,6 +1649,9 @@ class UpsInvoiceExporter:
             for c in ["Billed Weight (kg)", "Length (cm)", "Width (cm)", "Height (cm)"]:
                 if c in self.flat_packages.columns:
                     self.flat_packages[c] = pd.to_numeric(self.flat_packages[c], errors="coerce")
+
+        if "Bill Dim" not in self.flat_charges.columns:
+            self.flat_charges["Bill Dim"] = ""            
 
     def _ensure_flattened(self):
         if self.flat_charges is None or self.flat_charges.empty:
@@ -1633,7 +1718,7 @@ class UpsInvoiceExporter:
 
         output_file = self.output_path / "UPS_Invoice_Export.xlsx"
         with pd.ExcelWriter(output_file, engine="xlsxwriter") as writer:
-            df.to_excel(writer, sheet_name="Details", index=False)
+            df.fillna("").replace("nan", "").to_excel(writer, sheet_name="Details", index=False)
             summary_invoice.to_excel(writer, sheet_name="Summary by Invoice", index=False)
             summary_customer.to_excel(writer, sheet_name="Summary by Customer", index=False)
             (self.general_cost_df[["Charge_Cate_CN", "ap_amt"]]
@@ -1705,8 +1790,8 @@ class UpsInvoiceExporter:
                 continue
 
             combined_inv = pd.concat(dfs, ignore_index=True)
-            output_path = self.output_path / f"RAW_CustomerInvoice_{cid}.csv"
-            combined_inv.to_csv(output_path, header=header_list, index=False)
+            output_path = self.output_path / f"{cid}_{self.batch_number}.csv"
+            combined_inv.fillna("").replace("nan", "").to_csv(output_path, header=header_list, index=False)
             print(f"📁 Customer invoice exported: {output_path}")
 
     def _generate_general_customer_invoices(self):
@@ -1751,29 +1836,42 @@ class UpsInvoiceExporter:
             # AR Pivot (detail)
             # 1. Pivot table
             pivot_df = ar_sub.pivot_table(
-                index="Tracking Number",
+                index=["Lead Shipment Number", "Tracking Number"],
                 columns="Charge_Cate_CN",
                 values="ar_amt",
                 aggfunc="sum",
                 fill_value=0
-            )
+            ).reset_index()
+            pivot_df["Package Total"] = pivot_df.drop(columns=["Lead Shipment Number", "Tracking Number"]).sum(axis=1)
+            col_totals = pivot_df.drop(columns=["Lead Shipment Number", "Tracking Number"]).sum(axis=0).to_frame().T
+            col_totals.insert(0, "Lead Shipment Number", "Grand Total")
+            col_totals.insert(1, "Tracking Number", "")
+            pivot_df = pd.concat([pivot_df, col_totals], axis=0)
+
             # 2. Ensure "运费"(transporation fee) is the first column
             cols = pivot_df.columns.tolist()
             if "运费" in cols:
                 cols.remove("运费")
-                cols = ["运费"] + cols
+                cols = cols[:2] + ["运费"] + cols[2:]
             pivot_df = pivot_df[cols]
+            
             # 3. Optional: reset index for export
-            pivot_df = pivot_df.reset_index()
+            pivot_df = pivot_df.reset_index(drop=True)
+
+            # Ship Info
+            # Drop columns
+            cols_to_drop = ["cust_id", "Invoice Number", "Invoice Date", "Length (cm)", \
+                            "Width (cm)", "Height (cm)"]
+            pkg_sub = pkg_sub.drop(columns=cols_to_drop, errors="ignore")
 
             # Write
-            out = self.output_path / f"CustomerInvoice_{cid}.xlsx"
+            out = self.output_path / f"{cid}_{self.batch_number}.xlsx"
             with pd.ExcelWriter(out, engine="xlsxwriter") as w:
-                cover.to_excel(w, sheet_name="Invoice", index=False)
-                ar_summary.to_excel(w, sheet_name="AR Summary", index=False)
-                pivot_df.to_excel(w, sheet_name="Charge Pivot", index=False)
-                (pkg_sub if not pkg_sub.empty else pd.DataFrame(columns=["（no packages）"])).to_excel(
-                    w, sheet_name="Packages", index=False
+                cover.fillna("").replace("nan", "").to_excel(w, sheet_name="Invoice", index=False)
+                ar_summary.to_excel(w, sheet_name="Charge Summary", index=False)
+                pivot_df.fillna("").replace("nan", "").to_excel(w, sheet_name="Detail", index=False)
+                (pkg_sub if not pkg_sub.empty else pd.DataFrame(columns=["（no packages）"])).fillna("").replace("nan", "").to_excel(
+                    w, sheet_name="ShpInf", index=False
                 )
             print(f"📁 Customer invoice exported: {out}")
 
@@ -1887,7 +1985,7 @@ class UpsInvoiceExporter:
             "公开备注": "",
             "计量单位": "",
             "覆盖追加策略": "追加",
-            "自动对账": "Y"
+            "自动对账": "N"
         })
 
         output_file = self.output_path / "YDD_AR_Template.xlsx"

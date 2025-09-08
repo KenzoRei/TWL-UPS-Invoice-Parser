@@ -60,8 +60,7 @@ def main():
         if FLAG_API_MATCHUP:
             matcher = UpsCustomerMatcher(normalized_df, use_api=True, ydd_threads=CNT_THREAD)
             matcher.match_customers()
-            if CNT_THREAD>1:
-                matched_df = matcher.get_matched_data()
+            matched_df = matcher.get_matched_data()
         else:
             matcher = UpsCustomerMatcher(normalized_df)
             # Let the user choose exactly one 数据列表*.xlsx
@@ -70,8 +69,8 @@ def main():
                 raise RuntimeError("No mapping file selected.")
             matcher.match_customers()
             matched_df = matcher.get_matched_data()
-        matched_df.to_excel(out_path / "Matched_Invoices.xlsx", index=False)
-        print(f"mapping_pickup: {matcher.dict_pickup}")
+        # matched_df.to_excel(out_path / "Matched_Invoices.xlsx", index=False)
+        # print(f"mapping_pickup: {matcher.dict_pickup}")
         print(f"✅ Matching complete — {matched_df['cust_id'].nunique()} unique customers")
 
         # Better unmatched check (NaN or "")

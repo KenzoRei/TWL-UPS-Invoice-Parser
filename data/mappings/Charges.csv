@@ -4,7 +4,7 @@
 3 Day Select,Transportation Charge,运费
 3 Day Select Commercial,Transportation Charge,运费
 3 Day Select Residential,Transportation Charge,运费
-Address Correction Ground,Address Correction Fee,地址修正费
+Address Correction Ground,Address Correction Fee,地址更正费
 Commercial,Transportation Charge,运费
 Ground,Transportation Charge,运费
 Ground Commercial,Transportation Charge,运费
@@ -20,6 +20,7 @@ Future Day Pickup - Alternate Address - Web Request,Pickup Fee,取件费
 Future Day Pickup - Web Request,Pickup Fee,取件费
 On-call Saturday Stop Charge,Pickup Fee,取件费
 Residential Pickup surcharge,Pickup Fee,取件费
+3 UPS Pickup Attempts,Pickup Fee,取件费
 Returns 3 UPS Pickup Attempts,Pickup Fee,取件费
 Same Day Pickup - Alternate Address - Phone Request,Pickup Fee,取件费
 Same Day Pickup - Alternate Address - Web Request,Pickup Fee,取件费
@@ -83,3 +84,8 @@ Third Party Billing Service,Third Party Billing,第三方附加费
 Ground Hundredweight UPS Delivery Intercept,Delivery Intercept,拦截费
 Large Package Surcharge Resi - Length,Large Package Surcharge - Length,超大件-超长
 Large Package Surcharge Comm - Length,Large Package Surcharge - Length,超大件-超长
+Future Day Pickup - Phone Request,Pickup Fee,取件费
+Print Label,Print Label,标签打印
+Worldwide Expedited Shipment,Worldwide Expedited,Worldwide Expedited
+UPS carbon neutral,UPS carbon neutral fee,碳中和服务费
+Extended Area Surcharge,Delivery Area Surcharge - Extended,超偏远地区费
