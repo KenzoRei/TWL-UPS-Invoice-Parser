@@ -500,7 +500,7 @@ class UpsCustomerMatcher:
         self.api_cache_path = self.base_path / "output" / "ydd_ref_map.csv"
 
         # exception export
-        self.excluded_from_exception = list(SPECIAL_ACCT_TO_CUST)
+        self.excluded_from_exception = set(SPECIAL_ACCT_TO_CUST.keys())
 
         self.api_stats: dict = {}
 
@@ -587,7 +587,12 @@ class UpsCustomerMatcher:
         """
         df = self.df.copy()
         specials = set(SPECIAL_ACCT_TO_CUST.keys())
+        print(f"[DEBUG] Specials (excluded from YDD): {specials}")
         mask = ~df["Account Number"].astype(str).isin(specials)
+        excluded_accounts = df.loc[~mask, "Account Number"].unique().tolist()
+        print(f"[DEBUG] Excluded Account Numbers: {excluded_accounts}")
+        included_accounts = df.loc[mask, "Account Number"].unique().tolist()
+        print(f"[DEBUG] Included Account Numbers (sent to YDD): {included_accounts}")
 
         sub = df.loc[mask, ["Shipment Reference Number 1", "Lead Shipment Number", "Tracking Number"]].copy()
         sub["Shipment Reference Number 1"] = sub["Shipment Reference Number 1"].astype(str).str.strip()
@@ -597,6 +602,10 @@ class UpsCustomerMatcher:
         sub = sub.drop_duplicates(subset=["Shipment Reference Number 1"], keep="first")
 
         refs = sub["Shipment Reference Number 1"].tolist()
+        df.loc[mask].to_excel(
+            self.base_path / "output" / "ydd_refs_sent.xlsx"
+        )
+        print(f"[DEBUG] Shipment sent to YDD saved to output/ydd_refs_sent.xlsx")
         ref_to_best_trk = dict(zip(sub["Shipment Reference Number 1"], sub["best_trk"]))
         return refs, ref_to_best_trk
 
@@ -729,12 +738,14 @@ class UpsCustomerMatcher:
                         to_query, batch_size=min(self.ydd_batch_size, 10), sleep=0.01
                     )
             ref2api = build_ref_to_cust(api_items)  # danHao -> (cust_id, transfer_no)
+            
             # Output raw API mapping for debugging
             # print(f"ref2api contents: {ref2api}")
-            # pd.DataFrame([
-            #     {"danhao": k, "cust_id": v[0], "transfer_no": v[1]}
-            #     for k, v in ref2api.items()
-            # ]).to_excel(self.base_path / "output" / "ref2api_check.xlsx", index=False)
+            pd.DataFrame([
+                {"danhao": k, "cust_id": v[0], "transfer_no": v[1]}
+                for k, v in ref2api.items()
+            ]).to_excel(self.base_path / "output" / "ref2api_check.xlsx", index=False)
+
             # normalize to (cust_id, transfer_no) -- always use API's transfer_no
             fresh_ref_to_cust = {
                 ref: (cid, xfer)  # use API's transfer_no directly
@@ -778,10 +789,10 @@ class UpsCustomerMatcher:
             self._load_mapping_api()
         else:
             self._load_mapping_manual()
-        # pd.DataFrame([
-        #     {"danhao": k, "cust_id": v[0], "lead_shipment": v[1]}
-        #     for k, v in self.ref_to_cust.items()
-        # ]).to_excel("output/ref_to_cust_check.xlsx", index=False)
+        pd.DataFrame([
+            {"danhao": k, "cust_id": v[0], "lead_shipment": v[1]}
+            for k, v in self.ref_to_cust.items()
+        ]).to_excel("output/ref_to_cust_check.xlsx", index=False)
 
     # ---------------- main workflow ----------------
     def match_customers(self) -> None:
@@ -818,7 +829,7 @@ class UpsCustomerMatcher:
 
             if self.use_api:
                 danhao = str(row.get("Shipment Reference Number 1", "") or "").strip()
-                if not is_blank(danhao) and danhao in self.ref_to_cust:
+                if not is_blank(danhao) and danhao in self.ref_to_cust and row["Account Number"] not in self.excluded_from_exception:
                     cust_id, chosen_trk = self.ref_to_cust[danhao]
                     lead_shipment = chosen_trk if not is_blank(chosen_trk) else self._best_tracking_for_row(row)
                 else:
