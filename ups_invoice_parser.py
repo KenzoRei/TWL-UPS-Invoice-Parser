@@ -44,6 +44,7 @@ SPECIAL_CUSTS = set(SPECIAL_CUSTOMERS.keys())
 FLAG_API_USE = True
 YDD_USER = "5055457@qq.com"
 YDD_PASS = "Twc11434!"
+FLAG_DEBUG = False
 
 def is_blank(val) -> bool:
     """
@@ -587,12 +588,16 @@ class UpsCustomerMatcher:
         """
         df = self.df.copy()
         specials = set(SPECIAL_ACCT_TO_CUST.keys())
-        print(f"[DEBUG] Specials (excluded from YDD): {specials}")
+
+        if FLAG_DEBUG:
+            print(f"[DEBUG] Specials (excluded from YDD): {specials}")
         mask = ~df["Account Number"].astype(str).isin(specials)
         excluded_accounts = df.loc[~mask, "Account Number"].unique().tolist()
-        print(f"[DEBUG] Excluded Account Numbers: {excluded_accounts}")
+        if FLAG_DEBUG:
+            print(f"[DEBUG] Excluded Account Numbers: {excluded_accounts}")
         included_accounts = df.loc[mask, "Account Number"].unique().tolist()
-        print(f"[DEBUG] Included Account Numbers (sent to YDD): {included_accounts}")
+        if FLAG_DEBUG:
+            print(f"[DEBUG] Included Account Numbers (sent to YDD): {included_accounts}")
 
         sub = df.loc[mask, ["Shipment Reference Number 1", "Lead Shipment Number", "Tracking Number"]].copy()
         sub["Shipment Reference Number 1"] = sub["Shipment Reference Number 1"].astype(str).str.strip()
@@ -600,12 +605,13 @@ class UpsCustomerMatcher:
 
         sub["best_trk"] = sub.apply(self._best_tracking_for_row, axis=1)
         sub = sub.drop_duplicates(subset=["Shipment Reference Number 1"], keep="first")
-
+        
         refs = sub["Shipment Reference Number 1"].tolist()
-        df.loc[mask].to_excel(
-            self.base_path / "output" / "ydd_refs_sent.xlsx"
-        )
-        print(f"[DEBUG] Shipment sent to YDD saved to output/ydd_refs_sent.xlsx")
+        if FLAG_DEBUG:            
+            df.loc[mask].to_excel(
+                self.base_path / "output" / "ydd_refs_sent.xlsx"
+                , index=False)
+            print(f"[DEBUG] Shipment sent to YDD saved to output/ydd_refs_sent.xlsx")
         ref_to_best_trk = dict(zip(sub["Shipment Reference Number 1"], sub["best_trk"]))
         return refs, ref_to_best_trk
 
@@ -741,10 +747,12 @@ class UpsCustomerMatcher:
             
             # Output raw API mapping for debugging
             # print(f"ref2api contents: {ref2api}")
-            pd.DataFrame([
-                {"danhao": k, "cust_id": v[0], "transfer_no": v[1]}
-                for k, v in ref2api.items()
-            ]).to_excel(self.base_path / "output" / "ref2api_check.xlsx", index=False)
+            if FLAG_DEBUG:
+                pd.DataFrame([
+                    {"danhao": k, "cust_id": v[0], "transfer_no": v[1]}
+                    for k, v in ref2api.items()
+                ]).to_excel(self.base_path / "output" / "ref2api_check.xlsx", index=False)
+                print(f"[DEBUG] YDD API results saved to output/ref2api_check.xlsx")
 
             # normalize to (cust_id, transfer_no) -- always use API's transfer_no
             fresh_ref_to_cust = {
@@ -789,10 +797,13 @@ class UpsCustomerMatcher:
             self._load_mapping_api()
         else:
             self._load_mapping_manual()
-        pd.DataFrame([
-            {"danhao": k, "cust_id": v[0], "lead_shipment": v[1]}
-            for k, v in self.ref_to_cust.items()
-        ]).to_excel("output/ref_to_cust_check.xlsx", index=False)
+        # For debugging: dump ref_to_cust mapping
+        if FLAG_DEBUG and self.use_api:
+            pd.DataFrame([
+                {"danhao": k, "cust_id": v[0], "lead_shipment": v[1]}
+                for k, v in self.ref_to_cust.items()
+            ]).to_excel("output/ref_to_cust_check.xlsx", index=False)
+            print(f"[DEBUG] ref_to_cust mapping saved to output/ref_to_cust_check.xlsx")
 
     # ---------------- main workflow ----------------
     def match_customers(self) -> None:
@@ -921,7 +932,8 @@ class UpsCustomerMatcher:
             "vermilion" in row["Sender Company Name"].lower() or
             "vermilion" in row["Shipment Reference Number 1"].lower() or
             "yuzhao liu" in row["Sender Name"].lower() or
-            "yuzhao liu" in row["Sender Company Name"].lower()
+            "yuzhao liu" in row["Sender Company Name"].lower() or
+            "xiaorong" in row["Shipment Reference Number 1"].lower()
         ):
             return "F000215"
 
