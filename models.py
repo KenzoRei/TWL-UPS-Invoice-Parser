@@ -36,6 +36,9 @@ class Package:
         self.length = length
         self.width = width
         self.height = height
+        self.entered_length = ""
+        self.entered_width = ""
+        self.entered_height = ""
         self.ap_amt = ap_amt
         self.ar_amt = ar_amt
         self.charge_detail: dict[str, Charge] = {}

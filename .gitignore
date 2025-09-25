@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 .env
 output/
+data/raw_invoices/
+data/temp/

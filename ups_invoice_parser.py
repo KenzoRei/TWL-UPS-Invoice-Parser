@@ -1142,7 +1142,6 @@ class UpsInvoiceBuilder:
 
     def build_invoices(self):
         """Convert normalized DataFrame into nested Invoice → Shipment → Package → Charge structure."""
-
         # verify headers
         missing_cols = self._verify_invoice(self.df)
         if missing_cols != []:
@@ -1151,8 +1150,7 @@ class UpsInvoiceBuilder:
             logging.warning("Missing columns: %s", missing_cols_list)
         
         # grouping & object creation logic
-        for _, row in self.df.iterrows():
-            
+        for idx, row in self.df.iterrows():
             inv_num = row["Invoice Number"]
             if inv_num not in self.invoices:
                 # create invoice info
@@ -1163,11 +1161,12 @@ class UpsInvoiceBuilder:
                 invoice.acct_num = row["Account Number"]
                 invoice.batch_num = invoice.inv_num[-3:]
                 self.invoices[inv_num] = invoice
+            else:
+                invoice = self.invoices[inv_num]
 
             # for general invoice cost
             if is_blank(row["Lead Shipment Number"]):
                 self._build_invoice_cost(row, invoice)
-            
             # add/update shipment info
             else:
                 self._build_shipment(row, invoice)
@@ -1239,15 +1238,34 @@ class UpsInvoiceBuilder:
             def _nn(v):
                 return None if pd.isna(v) else v
 
+            # initialize dims directly
             package.length = _nn(row["Billed Length"])
-            package.width  = _nn(row["Billed Width"])
+            package.width = _nn(row["Billed Width"])
             package.height = _nn(row["Billed Height"])
+            package.entered_length = _nn(row["Entered Length"])
+            package.entered_width = _nn(row["Entered Width"])
+            package.entered_height = _nn(row["Entered Height"])
 
             package.pkg_ref1 = row["Package Reference Number 1"]
             package.pkg_ref2 = row["Package Reference Number 2"]
 
         else:
             package = shipment.packages[pkg_trk_num]
+            def _nn(v):
+                return None if pd.isna(v) else v
+            # Only update if not blank for dims (keep previous if blank)
+            if not is_blank(row["Billed Length"]):
+                package.length = _nn(row["Billed Length"])
+            if not is_blank(row["Billed Width"]):
+                package.width = _nn(row["Billed Width"])
+            if not is_blank(row["Billed Height"]):
+                package.height = _nn(row["Billed Height"])
+            if not is_blank(row["Entered Length"]):
+                package.entered_length = _nn(row["Entered Length"])
+            if not is_blank(row["Entered Width"]):
+                package.entered_width = _nn(row["Entered Width"])
+            if not is_blank(row["Entered Height"]):
+                package.entered_height = _nn(row["Entered Height"])
 
         # update charge at pkg lvl
         self._build_package_charge(row, package, shipment, invoice)
@@ -1427,7 +1445,7 @@ class UpsInvoiceBuilder:
 
 class UpsInvoiceExporter:
     GENERAL_ITEMCODE_MAP = {
-        "Payment Processing Fee": "7154",
+        "Payment Processing Fee": "6050",
         "SCC Audit Fee": "7152",
         "Daily Pickup": "7151",
         "Daily Pickup - Fuel": "7151"
@@ -1603,6 +1621,8 @@ class UpsInvoiceExporter:
                         except Exception:
                             return None
 
+                    Entered_L, Entered_W, Entered_H = getattr(pkg, "entered_length", None), getattr(pkg, "entered_width", None), getattr(pkg, "entered_height", None)
+                    enter_dim = self._fmt_inch_triplet(Entered_L, Entered_W, Entered_H)
                     L, W, H = getattr(pkg, "length", None), getattr(pkg, "width", None), getattr(pkg, "height", None)
                     bill_dim = self._fmt_inch_triplet(L, W, H)
 
@@ -1614,7 +1634,7 @@ class UpsInvoiceExporter:
                         "Tracking Number": getattr(pkg, "trk_num", "") or main_trk,
                         "Billed Weight": w_lb,
                         "Billed Weight (kg)": w_kg,
-                        "Entered Dim": "",
+                        "Entered Dim": enter_dim,
                         "Length (cm)": to_cm(getattr(pkg, "length", "")),
                         "Width (cm)":  to_cm(getattr(pkg, "width", "")),
                         "Height (cm)": to_cm(getattr(pkg, "height", "")),
