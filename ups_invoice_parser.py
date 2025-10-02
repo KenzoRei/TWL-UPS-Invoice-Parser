@@ -841,7 +841,7 @@ class UpsCustomerMatcher:
             if self.use_api:
                 danhao = str(row.get("Shipment Reference Number 1", "") or "").strip()
                 if not is_blank(danhao) and danhao in self.ref_to_cust and row["Account Number"] not in self.excluded_from_exception:
-                    cust_id, chosen_trk = self.ref_to_cust[danhao]
+                    cust_id, chosen_trk = (v.replace(" ", "") for v in self.ref_to_cust[danhao])
                     lead_shipment = chosen_trk if not is_blank(chosen_trk) else self._best_tracking_for_row(row)
                 else:
                     cust_id = self._exception_handler(row)
@@ -951,8 +951,12 @@ class UpsCustomerMatcher:
             return "F000222"
         elif not is_blank(row["Tracking Number"]) or not is_blank(row["Lead Shipment Number"]):
             return "F000222"
+        
+        # 7. STARTING INTERNATIONAL
+        elif "S202508220027-P" in row["Shipment Reference Number 1"].upper():
+            return "F000253"
 
-        # 7. Daily Pickup logic
+        # 8. Daily Pickup logic
         elif row["Charge_Cate_EN"] in ["Daily Pickup", "Daily Pickup - Fuel"]:
             return self.dict_pickup.get(row["Account Number"], {}).get("Cust.ID", self.DEFAULT_CUST_ID)
 
@@ -961,11 +965,11 @@ class UpsCustomerMatcher:
         #     row["Sender Company Name"].lower() == "twnj":
         #     return "F000299"
         
-        # 8. Generic cost rules
+        # 9. Generic cost rules
         elif str(row["Charge_Cate_EN"]).upper() in ["SCC AUDIT FEE", "POD FEE"]:
             return self.DEFAULT_CUST_ID
 
-        # 9. Fallback
+        # Fallback
         print(f"account number: {row['Account Number']}")
         print(f"Charge_Cate_EN: {row['Charge_Cate_EN']}")
         print(f"pass all exception handlings. 'Charge Description':{row['Charge Description']}, 'Charge_Cate_EN':{row['Charge_Cate_EN']}, 'Amount':{row['Net Amount']}")
@@ -1448,7 +1452,8 @@ class UpsInvoiceExporter:
         "Payment Processing Fee": "6050",
         "SCC Audit Fee": "7152",
         "Daily Pickup": "7151",
-        "Daily Pickup - Fuel": "7151"
+        "Daily Pickup - Fuel": "7151",
+        "POD Fee": "7154",
     }
 
     def __init__(self, invoices: dict):
