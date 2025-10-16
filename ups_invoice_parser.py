@@ -825,6 +825,11 @@ class UpsCustomerMatcher:
 
             # classify charges
             category_en, category_cn = self._charge_classifier(row)
+            # normalize (strip) classification strings to avoid mismatches caused by stray spaces
+            if isinstance(category_en, str):
+                category_en = category_en.strip()
+            if isinstance(category_cn, str):
+                category_cn = category_cn.strip()
             self.df.at[idx, "Charge_Cate_EN"] = category_en
             row["Charge_Cate_EN"] = category_en
             self.df.at[idx, "Charge_Cate_CN"] = category_cn
@@ -840,7 +845,12 @@ class UpsCustomerMatcher:
 
             if self.use_api:
                 danhao = str(row.get("Shipment Reference Number 1", "") or "").strip()
-                if not is_blank(danhao) and danhao in self.ref_to_cust and row["Account Number"] not in self.excluded_from_exception:
+                # Priority: if this is a pickup charge, prefer the Pickups.csv mapping for the account
+                # This prevents the YDD API/cache from overriding the intended pickup-account mapping
+                if category_en in ["Daily Pickup", "Daily Pickup - Fuel"] and row["Account Number"] in self.dict_pickup:
+                    cust_id = self.dict_pickup.get(row["Account Number"], {}).get("Cust.ID", self.DEFAULT_CUST_ID)
+                    lead_shipment = self._best_tracking_for_row(row)
+                elif not is_blank(danhao) and danhao in self.ref_to_cust and row["Account Number"] not in self.excluded_from_exception:
                     cust_id, chosen_trk = (v.replace(" ", "") for v in self.ref_to_cust[danhao])
                     lead_shipment = chosen_trk if not is_blank(chosen_trk) else self._best_tracking_for_row(row)
                 else:
@@ -864,7 +874,7 @@ class UpsCustomerMatcher:
 
             # backfill when needed
             if is_blank(self.df.at[idx, "Lead Shipment Number"]) and cust_id != self.DEFAULT_CUST_ID:
-                ls = str(row.get("Invoice Number", "")) + "-AcctExpense"
+                ls = str(row.get("Invoice Number", "")) + "-" + str(category_en).replace(" ", "_")
                 self.df.at[idx, "Lead Shipment Number"] = ls
                 self.df.at[idx, "Tracking Number"] = ls
                 self.df.at[idx, "Shipment Reference Number 1"] = ls
