@@ -27,7 +27,7 @@
 26,Package Reference Number 5,str,0
 27,Entered Weight,float,1
 28,Entered Weight Unit of Measure,str,0
-29,Billed Weight,int,1
+29,Billed Weight,float,1
 30,Billed Weight Unit of Measure,str,0
 31,Container Type,str,0
 32,Billed Weight Type,str,1
