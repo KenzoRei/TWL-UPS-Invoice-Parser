@@ -63,12 +63,39 @@ class YDDClient:
         out: List[dict] = []
         for i in range(0, len(clean), batch_size):
             chunk = clean[i:i+batch_size]
-            js = self._get("/queryYunDanDetail", params={"danHaos": ",".join(chunk)})
+            # URL encode commas in individual references to prevent API misinterpretation
+            encoded_chunk = [ref.replace(",", "%2C") for ref in chunk]
+            js = self._get("/queryYunDanDetail", params={"danHaos": ",".join(encoded_chunk)})
             if not js.get("success", False):
-                logging.warning(f"YDD success=false for {chunk}: {js}")
+                logging.warning(f"[YDD Danhao]YDD success=false for {chunk}: {js}")
             data = js.get("data") or []
             if not isinstance(data, list):
-                logging.warning("YDD payload 'data' is not a list; skipping.")
+                logging.warning("[YDD Danhao]YDD payload 'data' is not a list; skipping.")
+                data = []
+            out.extend(data)
+            time.sleep(sleep)
+        return out
+
+    # ---- business: query package info by tracking number(10 pkgs/batch) ----
+    # Inputs can be Reference Number or Lead Shipment Number
+    def query_piece_detail(self, danhaos: Iterable[str], *, batch_size: int = 10, sleep: float = 0.05) -> List[dict]:
+        """Returns concatenated 'data' arrays across batches."""
+        # Ensure we’re authenticated
+        if not self.token:
+            self.login()
+
+        clean = [str(x).strip() for x in danhaos if str(x).strip()]
+        out: List[dict] = []
+        for i in range(0, len(clean), batch_size):
+            chunk = clean[i:i+batch_size]
+            # URL encode commas in individual references to prevent API misinterpretation
+            encoded_chunk = [ref.replace(",", "%2C") for ref in chunk]
+            js = self._get("/queryPieceDetail", params={"danHaos": ",".join(encoded_chunk)})
+            if not js.get("success", False):
+                logging.warning(f"[YDD Trk]YDD success=false for {chunk}: {js}")
+            data = js.get("data") or []
+            if not isinstance(data, list):
+                logging.warning("[YDD Trk]YDD payload 'data' is not a list; skipping.")
                 data = []
             out.extend(data)
             time.sleep(sleep)
