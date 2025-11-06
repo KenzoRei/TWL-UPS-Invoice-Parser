@@ -36,7 +36,7 @@ General_Cost_EN = {
 # 3) Total ar amount = total ap amount * index, instead of aggregation of all charges
 # 4) Need split original invoices instead of re-arranged invoices
 SPECIAL_CUSTOMERS = {
-    "F000222": {"accounts": {"H930G2", "H930G3", "H930G4", "R1H015", "XJ3936", "Y209J6", "Y215B9"}},
+    "F000222": {"accounts": {"H930G2", "H930G3", "H930G4", "R1H015", "XJ3936", "Y209J6", "Y215B9", "0H947Y"}},
     "F000208": {"accounts": {"HE6132"}},
 }
 SPECIAL_ACCT_TO_CUST = {acct: cust for cust, v in SPECIAL_CUSTOMERS.items() for acct in v["accounts"]}
@@ -221,10 +221,18 @@ class UpsInvLoader:
         out_path = base_path / str(self.batch_number) if self.batch_number else base_path
         out_path.mkdir(parents=True, exist_ok=True)
 
+        copied_count = 0
         for file in self.invoices:
-            shutil.copy(file, out_path / file.name)
+            destination = out_path / file.name
+            # Skip copying if the file is already in the destination (same path)
+            if file.resolve() != destination.resolve():
+                shutil.copy(file, destination)
+                copied_count += 1
 
-        print(f"📁 Archived {len(self.invoices)} files to {out_path}")
+        if copied_count > 0:
+            print(f"📁 Archived {copied_count} files to {out_path}")
+        else:
+            print(f"📁 All {len(self.invoices)} files were already in {out_path}")
     
     def run_import(
         self,
@@ -313,6 +321,23 @@ class UpsInvNormalizer:
         self.filtered_col_name = self.headers.loc[self.headers['Flag'] == 1,'Column Name'].tolist()
         self.date_cols = self.headers.loc[mask_date, 'Column Name'].tolist()
     
+    def _convert_dtypes_safely(self, df):
+        """Convert data types safely, handling conversion errors gracefully."""
+        for col_name, target_type in self.dtype_map.items():
+            if col_name in df.columns:
+                if target_type == int:
+                    # For integer columns, first convert to float, then to int (handles decimal strings)
+                    df[col_name] = pd.to_numeric(df[col_name], errors='coerce')
+                    # Only convert to int if there are no decimals, otherwise keep as float
+                    if df[col_name].notna().any():
+                        if (df[col_name] % 1 == 0).all():
+                            df[col_name] = df[col_name].astype('Int64')  # Nullable integer
+                        # If there are decimals, keep as float (don't force to int)
+                elif target_type == float:
+                    df[col_name] = pd.to_numeric(df[col_name], errors='coerce')
+                elif target_type == str:
+                    df[col_name] = df[col_name].astype(str)
+    
     def _save_trk_nums(self):
         out_path = Path(__file__).resolve().parent / "output"
         out_path.mkdir(parents=True, exist_ok=True)
@@ -345,31 +370,58 @@ class UpsInvNormalizer:
         for file in self.file_list:
             last_err = None
             for enc in tried_encs:
+                print(f"[DEBUG] Trying to load {file.name} with encoding {enc}...")
                 try:
+                    # First try with original dtype mapping
                     df = pd.read_csv(
                         file,
                         header=None,
                         names=self.all_col_name,
                         dtype=self.dtype_map,
+                        low_memory=False,
                         encoding=enc,                 # ← try encodings
                         encoding_errors="strict",     # or "replace" to keep going
                     )
                     # success -> stop trying encodings
                     print(f"✓ Loaded {file.name} with encoding {enc}")
                     break
-                except UnicodeDecodeError as e:
-                    last_err = e
-                    continue
+                except (UnicodeDecodeError, ValueError) as e:
+                    if isinstance(e, UnicodeDecodeError):
+                        last_err = e
+                        continue
+                    elif isinstance(e, ValueError) and "cannot safely convert" in str(e):
+                        # Try loading without dtype constraints for problematic columns
+                        print(f"[DEBUG] Dtype conversion error, trying flexible loading...")
+                        try:
+                            df = pd.read_csv(
+                                file,
+                                header=None,
+                                names=self.all_col_name,
+                                dtype=str,  # Load everything as strings first
+                                low_memory=False,
+                                encoding=enc,
+                                encoding_errors="strict",
+                            )
+                            # Convert types manually after loading
+                            self._convert_dtypes_safely(df)
+                            print(f"✓ Loaded {file.name} with encoding {enc} (flexible mode)")
+                            break
+                        except UnicodeDecodeError:
+                            last_err = e
+                            continue
+                    else:
+                        raise e
             else:
                 # no encoding worked; as a last resort, force replacement
                 df = pd.read_csv(
                     file,
                     header=None,
                     names=self.all_col_name,
-                    dtype=self.dtype_map,
+                    dtype=str,  # Use strings to avoid conversion errors
                     encoding="latin1",
                     encoding_errors="replace",  # keeps data, replaces bad bytes
                 )
+                self._convert_dtypes_safely(df)
                 print(f"! Loaded {file.name} with latin1 (replacement used)")
 
             # keep only flagged columns
@@ -497,7 +549,13 @@ class UpsCustomerMatcher:
         self.dict_chrg:   Dict[str, dict] = {}
         self.dict_ar:     Dict[str, dict] = {}
 
-        # YDD cache file
+        # New cache configuration (data/cache/ structure)
+        self.cache_dir = self.base_path / "data" / "cache"
+        self.cache_file = self.cache_dir / "trk_to_cust.csv"
+        self.archive_dir = self.cache_dir / "archive"
+        self.max_cache_records = 100000  # 100K record limit
+        
+        # Legacy cache file (will be migrated)
         self.api_cache_path = self.base_path / "output" / "ydd_ref_map.csv"
 
         # exception export
@@ -510,6 +568,143 @@ class UpsCustomerMatcher:
         ls  = str(row.get("Lead Shipment Number", "") or "").strip()
         trk = str(row.get("Tracking Number", "") or "").strip()
         return ls if not is_blank(ls) else trk
+
+    # ---------------- cache management ----------------
+    def _ensure_cache_structure(self) -> None:
+        """Create cache directory structure if needed"""
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.archive_dir.mkdir(parents=True, exist_ok=True)
+        
+    def _create_trk2cust_cache(self) -> None:
+        """Create empty cache file with proper headers"""
+        self._ensure_cache_structure()
+        
+        # Create empty DataFrame with proper columns
+        empty_cache = pd.DataFrame(columns=[
+            'tracking', 'cust_id', 'transfer_no', 'created_at', 'source'
+        ])
+        empty_cache.to_csv(self.cache_file, index=False, encoding='utf-8-sig')
+        print(f"[Cache] Created empty cache file: {self.cache_file}")
+        
+    def _load_trk2cust_cache(self) -> Dict[str, Tuple[str, str]]:
+        """Load trk→(cust_id, transfer_no) from data/cache/trk_to_cust.csv"""
+        if not self.use_cache:
+            return {}
+            
+        # Create cache structure if needed
+        self._ensure_cache_structure()
+        
+        # Create cache file if it doesn't exist
+        if not self.cache_file.exists():
+            self._create_trk2cust_cache()
+            return {}
+            
+        try:
+            cache_df = pd.read_csv(self.cache_file, encoding='utf-8-sig')
+        except pd.errors.EmptyDataError:
+            print(f"[Cache] Cache file is empty, recreating: {self.cache_file}")
+            self._create_trk2cust_cache()
+            return {}
+        except Exception as e:
+            print(f"[Cache] Failed to read cache {self.cache_file}: {e}")
+            return {}
+            
+        # Validate required columns
+        required_cols = {'tracking', 'cust_id', 'transfer_no'}
+        if not required_cols.issubset(cache_df.columns):
+            missing = required_cols - set(cache_df.columns)
+            print(f"[Cache] Cache missing columns {missing}, recreating")
+            self._create_trk2cust_cache()
+            return {}
+            
+        # Convert to dictionary format: tracking → (cust_id, transfer_no)
+        cache_dict = {}
+        for _, row in cache_df.iterrows():
+            tracking = str(row['tracking']).strip()
+            cust_id = str(row['cust_id']).strip()
+            transfer_no = str(row['transfer_no']).strip()
+            
+            if tracking and cust_id:  # Only add valid entries
+                cache_dict[tracking] = (cust_id, transfer_no)
+                
+        print(f"[Cache] Loaded {len(cache_dict)} mappings from cache")
+        return cache_dict
+        
+    def _update_trk2cust_cache(self, new_mappings: Dict[str, Tuple[str, str]]) -> None:
+        """Update cache with new mappings (basic version without archiving)"""
+        if not self.use_cache or not new_mappings:
+            return
+            
+        # Load existing cache
+        cache_dict = self._load_trk2cust_cache()
+        
+        # Add new mappings
+        now = datetime.datetime.now().isoformat()
+        updated_count = 0
+        
+        for tracking, (cust_id, transfer_no) in new_mappings.items():
+            if tracking.strip() and cust_id.strip():
+                cache_dict[tracking] = (cust_id, transfer_no)
+                updated_count += 1
+                
+        # Convert back to DataFrame
+        cache_rows = []
+        for tracking, (cust_id, transfer_no) in cache_dict.items():
+            cache_rows.append({
+                'tracking': tracking,
+                'cust_id': cust_id,
+                'transfer_no': transfer_no,
+                'created_at': now,
+                'source': 'api'
+            })
+            
+        cache_df = pd.DataFrame(cache_rows)
+        
+        # Check cache size (basic check without archiving for now)
+        if len(cache_df) > self.max_cache_records:
+            print(f"[Cache] WARNING: Cache size {len(cache_df)} exceeds limit {self.max_cache_records}")
+            print(f"[Cache] TODO: Implement archiving (Phase 1b)")
+            
+        # Save updated cache
+        try:
+            # Use temp file for atomic writes
+            temp_file = self.cache_file.with_suffix('.tmp')
+            cache_df.to_csv(temp_file, index=False, encoding='utf-8-sig')
+            temp_file.replace(self.cache_file)
+            print(f"[Cache] Updated cache: {len(cache_df)} total records (+{updated_count} new)")
+        except Exception as e:
+            print(f"[Cache] Failed to save cache: {e}")
+            
+    def _migrate_legacy_cache(self) -> Dict[str, Tuple[str, str]]:
+        """Migrate data from old ydd_ref_map.csv to new cache format (one-time migration)"""
+        legacy_mappings = {}
+        
+        # Try to load from legacy cache
+        if self.api_cache_path.exists():
+            try:
+                legacy_df = pd.read_csv(self.api_cache_path)
+                required = {"danHao", "cust_id", "tracking"}
+                
+                if required.issubset(legacy_df.columns):
+                    # Convert danHao mappings to tracking mappings
+                    for _, row in legacy_df.iterrows():
+                        tracking = str(row["tracking"]).strip()
+                        cust_id = str(row["cust_id"]).strip()
+                        danhao = str(row["danHao"]).strip()
+                        
+                        if tracking and cust_id:
+                            legacy_mappings[tracking] = (cust_id, danhao)
+                            
+                    print(f"[Cache] Migrated {len(legacy_mappings)} mappings from legacy cache")
+                    
+                    # Save to new cache format
+                    if legacy_mappings:
+                        self._update_trk2cust_cache(legacy_mappings)
+                        
+            except Exception as e:
+                print(f"[Cache] Failed to migrate legacy cache: {e}")
+                
+        return legacy_mappings
 
     def set_mapping_file(self, path: Path) -> None:
         self.mapping_file = Path(path) if path else None
@@ -615,6 +810,227 @@ class UpsCustomerMatcher:
         ref_to_best_trk = dict(zip(sub["Shipment Reference Number 1"], sub["best_trk"]))
         return refs, ref_to_best_trk
 
+    # ---------------- enhanced matching workflow ----------------
+    def _collect_trk_ref(self) -> Dict[str, str]:
+        """
+        Create tracking → ref dict for enhanced matching workflow.
+        Replaces _collect_danhaos_with_tracking with focus on unique tracking numbers.
+        
+        Returns:
+            Dict[str, str]: tracking → ref mapping (tracking must be unique/non-empty, ref can be empty)
+        """
+        df = self.df.copy()
+        specials = set(SPECIAL_ACCT_TO_CUST.keys())
+
+        if FLAG_DEBUG:
+            print(f"[DEBUG] Collecting trk→ref mappings, excluding specials: {specials}")
+
+        # Filter out special accounts
+        mask = ~df["Account Number"].astype(str).isin(specials)
+        sub = df.loc[mask, ["Tracking Number", "Lead Shipment Number", "Shipment Reference Number 1"]].copy()
+
+        # Clean and prepare tracking numbers
+        sub["tracking"] = sub["Tracking Number"].astype(str).str.strip()
+        sub.loc[sub["tracking"].apply(is_blank), "tracking"] = sub["Lead Shipment Number"].astype(str).str.strip()
+
+        # Clean reference numbers (allow empty refs)
+        sub["ref"] = sub["Shipment Reference Number 1"].astype(str).str.strip()
+        sub.loc[sub["ref"].apply(is_blank), "ref"] = ""
+
+        # Filter: tracking must be unique and non-empty
+        sub = sub[~sub["tracking"].apply(is_blank)]
+        sub = sub.drop_duplicates(subset=["tracking"], keep="first")
+
+        trk_ref_dict = dict(zip(sub["tracking"], sub["ref"]))
+
+        if FLAG_DEBUG:
+            total_tracking = len(trk_ref_dict)
+            with_refs = sum(1 for ref in trk_ref_dict.values() if ref)
+            without_refs = total_tracking - with_refs
+            print(f"[DEBUG] Collected {total_tracking} tracking numbers: {with_refs} with refs, {without_refs} without refs")
+
+        return trk_ref_dict
+
+    def _ref2cust_matching(self, refs: List[str]) -> Dict[str, Tuple[str, str]]:
+        """
+        Get ref → (cust_id, transfer_no) mapping via YDD query_yundan_detail API
+        
+        Args:
+            refs: List of reference numbers (danHaos) to query
+            
+        Returns:
+            Dict[str, Tuple[str, str]]: ref → (cust_id, transfer_no) mapping
+        """
+        if not refs:
+            return {}
+
+        # Remove empty/blank refs
+        clean_refs = [str(ref).strip() for ref in refs if not is_blank(str(ref))]
+        
+        if not clean_refs:
+            return {}
+
+        print(f"[YDD] Querying {len(clean_refs)} refs via query_yundan_detail...")
+
+        try:
+            client = self._ensure_ydd_client()
+            
+            # Use existing concurrent query or sequential based on settings
+            if self.ydd_threads > 1:
+                api_items = self._query_concurrent(
+                    client, clean_refs,
+                    batch_size=min(self.ydd_batch_size, 10),
+                    workers=self.ydd_threads,
+                )
+            else:
+                api_items = client.query_yundan_detail(
+                    clean_refs, 
+                    batch_size=min(self.ydd_batch_size, 10), 
+                    sleep=0.01
+                )
+
+            # Convert API response to ref → cust mapping
+            from YDD_Client import build_ref_to_cust
+            ref_to_cust = build_ref_to_cust(api_items)
+
+            print(f"[YDD] query_yundan_detail: {len(api_items)} API items → {len(ref_to_cust)} mappings")
+
+            return ref_to_cust
+
+        except Exception as e:
+            error_msg = str(e)
+            print(f"[YDD] Error in _ref2cust_matching: {error_msg}")
+            
+            # Specific handling for 403 Forbidden errors
+            if "403" in error_msg and "Forbidden" in error_msg:
+                print(f"[YDD] 403 Forbidden Error Analysis:")
+                print(f"   • This may be caused by invalid characters in references")
+                print(f"   • Try reducing batch_size or checking reference formats")
+                print(f"   • Some references: {clean_refs[:3]}...")
+                print(f"   • Total references in batch: {len(clean_refs)}")
+                
+                # Attempt smaller batch or individual queries for debugging
+                if len(clean_refs) > 1:
+                    print(f"[YDD] Attempting smaller batch retry...")
+                    try:
+                        # Try first reference alone
+                        client = self._ensure_ydd_client()
+                        test_items = client.query_yundan_detail([clean_refs[0]], batch_size=1)
+                        print(f"[YDD] ✅ Single reference test successful")
+                        
+                        # If single works, try smaller batches
+                        from YDD_Client import build_ref_to_cust
+                        all_items = []
+                        for ref in clean_refs[:3]:  # Test first 3 only
+                            try:
+                                items = client.query_yundan_detail([ref], batch_size=1)
+                                all_items.extend(items)
+                            except Exception as single_e:
+                                print(f"[YDD] ❌ Problematic ref: {ref} - {single_e}")
+                        
+                        if all_items:
+                            result = build_ref_to_cust(all_items)
+                            print(f"[YDD] 🔄 Partial recovery: {len(result)} mappings from single queries")
+                            return result
+                            
+                    except Exception as retry_e:
+                        print(f"[YDD] Retry also failed: {retry_e}")
+            
+            return {}
+
+    def _trk2ref_matching(self, trackings: List[str]) -> Dict[str, str]:
+        """
+        Get tracking → ref mapping via YDD query_piece_detail API
+        Extracts keHuDanHao from piece detail results
+        
+        Args:
+            trackings: List of tracking numbers to query
+            
+        Returns:
+            Dict[str, str]: tracking → keHuDanHao mapping
+        """
+        if not trackings:
+            return {}
+
+        # Remove empty/blank trackings
+        clean_trackings = [str(trk).strip() for trk in trackings if not is_blank(str(trk))]
+        
+        if not clean_trackings:
+            return {}
+
+        print(f"[YDD] Querying {len(clean_trackings)} trackings via query_piece_detail...")
+
+        try:
+            client = self._ensure_ydd_client()
+
+            # Query piece details
+            api_items = client.query_piece_detail(
+                clean_trackings, 
+                batch_size=min(self.ydd_batch_size, 10), 
+                sleep=0.01
+            )
+
+            # Extract tracking → keHuDanHao mapping
+            trk_to_ref = {}
+            for item in api_items:
+                # Use the select_tracking function to get the best tracking identifier
+                from YDD_Client import select_tracking
+                trk = select_tracking(item)
+                ke_hu_dan_hao = str(item.get("keHuDanHao", "")).strip()
+                
+                if trk and ke_hu_dan_hao:
+                    trk_to_ref[trk] = ke_hu_dan_hao
+
+            if FLAG_DEBUG:
+                print(f"[Debug] query_piece_detail: {len(api_items)} API items → {len(trk_to_ref)} trk→ref mappings")
+
+            return trk_to_ref
+
+        except Exception as e:
+            print(f"[YDD] Error in _trk2ref_matching: {e}")
+            return {}
+
+    def _trk2cust_two_step_matching(self, trackings: List[str]) -> Dict[str, Tuple[str, str]]:
+        """
+        Two-step matching: tracking → ref → (cust_id, transfer_no)
+        Combines _trk2ref_matching and _ref2cust_matching
+        
+        Args:
+            trackings: List of tracking numbers for two-step matching
+            
+        Returns:
+            Dict[str, Tuple[str, str]]: tracking → (cust_id, transfer_no) mapping
+        """
+        if not trackings:
+            return {}
+
+        print(f"[YDD] Starting two-step matching for {len(trackings)} trackings...")
+
+        # Step 1: tracking → ref via piece_detail
+        trk_to_ref = self._trk2ref_matching(trackings)
+
+        if not trk_to_ref and FLAG_DEBUG:
+            print("[Debug] Two-step matching: No tracking→ref mappings found")
+            return {}
+
+        # Step 2: ref → cust via yundan_detail  
+        unique_refs = list(set(trk_to_ref.values()))
+        ref_to_cust = self._ref2cust_matching(unique_refs)
+
+        if not ref_to_cust and FLAG_DEBUG:
+            print("[Debug] Two-step matching: No ref→cust mappings found")
+            return {}
+
+        # Step 3: Combine tracking → ref → cust
+        trk_to_cust = {}
+        for trk, ref in trk_to_ref.items():
+            if ref in ref_to_cust:
+                trk_to_cust[trk] = ref_to_cust[ref]
+
+        print(f"[YDD] Two-step matching: {len(trk_to_cust)} final tracking→cust mappings")
+
+        return trk_to_cust
+
     @staticmethod
     def _query_concurrent(
         client, danhaos: List[str], *, batch_size: int, workers: int,
@@ -707,89 +1123,126 @@ class UpsCustomerMatcher:
         tmp = self.api_cache_path.with_suffix(".tmp")
         df.to_csv(tmp, index=False, encoding="utf-8-sig")
         tmp.replace(self.api_cache_path)
-
+    
     def _load_mapping_api(self) -> None:
-        from YDD_Client import build_ref_to_cust  # danHao -> (cust_id, transfer_no)
+        """
+        Enhanced 5-step matching workflow:
+        1. Load cache & collect tracking numbers  
+        2. Match via references (yundan_detail API)
+        3. Arrange remaining for tracking-based matching
+        4. Match via two-step process (piece_detail → yundan_detail)
+        5. Merge results and update cache
+        """
         client = self._ensure_ydd_client()
 
-        # login timing is useful
+        # Login timing
         t0 = time.perf_counter()
         token = client.login()
         t1 = time.perf_counter()
-
-        danhaos, ref_to_best_trk = self._collect_danhaos_with_tracking()
-        total_refs = len(danhaos)
-
-        # cache
-        cached = self._load_api_cache()
-        cached_hits = sum(1 for d in danhaos if d in cached)
-        to_query = [d for d in danhaos if d not in cached]
-
         print(f"[YDD] Login OK in {t1 - t0:0.3f}s (token len={len(token)})")
-        print(f"[YDD] Refs total={total_refs}, cached={cached_hits}, querying={len(to_query)}, "
-            f"threads={self.ydd_threads}, batch_size={min(self.ydd_batch_size,10)}")
 
-        api_items = []
-        error_msg = None
-        try:
-            if to_query:
-                if self.ydd_threads > 1:
-                    api_items = self._query_concurrent(
-                        client, to_query,
-                        batch_size=min(self.ydd_batch_size, 10),
-                        workers=self.ydd_threads,
-                    )
-                else:
-                    api_items = client.query_yundan_detail(
-                        to_query, batch_size=min(self.ydd_batch_size, 10), sleep=0.01
-                    )
-            ref2api = build_ref_to_cust(api_items)  # danHao -> (cust_id, transfer_no)
+        # ===== Step 1: Load cache & collect tracking numbers =====
+        print("\n[YDD] Step 1: Loading cache and collecting tracking numbers...")
+        cache_dict = self._load_trk2cust_cache()  # tracking → (cust_id, transfer_no)
+        trk_ref_map = self._collect_trk_ref()     # tracking → ref
+        
+        total_trackings = len(trk_ref_map)
+        cache_hits = sum(1 for trk in trk_ref_map if trk in cache_dict)
+        unmatched_trackings = [trk for trk in trk_ref_map if trk not in cache_dict]
+        
+        if FLAG_DEBUG:
+            print(f"[Debug] Total trackings: {total_trackings}")
+            print(f"[Debug] Cache hits: {cache_hits}")
+            print(f"[Debug] Unmatched trackings: {len(unmatched_trackings)}")
+
+        # ===== Step 2: Reference-based matching (yundan_detail) =====
+        print("\n[YDD] Step 2: Reference-based matching...")
+        unmatched_refs = {trk_ref_map[trk] for trk in unmatched_trackings if trk_ref_map[trk]}
+        unmatched_refs = [ref for ref in unmatched_refs if ref]  # Remove empty refs
+        
+        if FLAG_DEBUG:
+            print(f"[Debug] Unique refs to query: {len(unmatched_refs)}")
+        
+        ref2cust = {}
+        first_part_trk2cust = {}
+        
+        if unmatched_refs:
+            ref2cust = self._ref2cust_matching(unmatched_refs)
             
-            # Output raw API mapping for debugging
-            # print(f"ref2api contents: {ref2api}")
-            if FLAG_DEBUG:
-                pd.DataFrame([
-                    {"danhao": k, "cust_id": v[0], "transfer_no": v[1]}
-                    for k, v in ref2api.items()
-                ]).to_excel(self.base_path / "output" / "ref2api_check.xlsx", index=False)
-                print(f"[DEBUG] YDD API results saved to output/ref2api_check.xlsx")
+            # Map trackings that have refs to customer info
+            for trk in unmatched_trackings:
+                ref = trk_ref_map.get(trk, "")
+                if ref and ref in ref2cust:
+                    first_part_trk2cust[trk] = ref2cust[ref]
+        
+        ref_based_matches = len(first_part_trk2cust)
+        if FLAG_DEBUG:
+            print(f"[Debug] Reference-based matches: {ref_based_matches}")
 
-            # normalize to (cust_id, transfer_no) -- always use API's transfer_no
-            fresh_ref_to_cust = {
-                ref: (cid, xfer)  # use API's transfer_no directly
-                for ref, (cid, xfer) in ref2api.items()
-            }
-            cached.update(fresh_ref_to_cust)
-        except Exception as e:
-            error_msg = f"{type(e).__name__}: {e}"
-            print(f"[YDD] ❌ API error: {error_msg}")
+        # ===== Step 3: Arrange remaining trackings =====
+        print("\n[YDD] Step 3: Arranging remaining trackings...")
+        still_unmatched = [trk for trk in unmatched_trackings if trk not in first_part_trk2cust]
 
-        # finalize
-        self.ref_to_cust = cached
-        self._save_api_cache(self.ref_to_cust)
+        if FLAG_DEBUG:
+            print(f"[Debug] Trackings for two-step matching: {len(still_unmatched)}")
+
+        # ===== Step 4: Two-step matching (piece_detail → yundan_detail) =====
+        print("\n[YDD] Step 4: Two-step matching...")
+        second_part_trk2cust = {}
+        
+        if still_unmatched:
+            second_part_trk2cust = self._trk2cust_two_step_matching(still_unmatched)
+        
+        two_step_matches = len(second_part_trk2cust)
+
+        if FLAG_DEBUG:
+            print(f"[Debug] Two-step matches: {two_step_matches}")
+
+        # ===== Step 5: Merge results and update cache =====
+        print("\n[YDD] Step 5: Merging results and updating cache...")
+        
+        # Merge all new mappings
+        all_new_mappings = {**first_part_trk2cust, **second_part_trk2cust}
+        
+        # Update cache with new mappings
+        if all_new_mappings:
+            self._update_trk2cust_cache(all_new_mappings)
+        
+        # Combine cache + new mappings for final result
+        self.trk_to_cust = {**cache_dict, **all_new_mappings}
+        
+        # Load common mappings
         self._load_common_mappings()
 
-        # compute missing & write CSV if any
-        missing = [d for d in danhaos if d not in self.ref_to_cust]
-        if missing:
-            miss_path = self.base_path / "output" / "missing_danhaos_ydd.csv"
+        # Generate missing tracking report
+        final_unmatched = [trk for trk in trk_ref_map if trk not in self.trk_to_cust]
+        if final_unmatched:
+            miss_path = self.base_path / "output" / "missing_trackings_ydd.csv"
             miss_path.parent.mkdir(parents=True, exist_ok=True)
-            pd.Series(missing, name="danHao").to_csv(miss_path, index=False, encoding="utf-8-sig")
-            print(f"[YDD] ❌ Missing {len(missing)} ref(s). Saved to: {miss_path}")
+            pd.Series(final_unmatched, name="tracking").to_csv(miss_path, index=False, encoding="utf-8-sig")            
+            print(f"[YDD] ❌ Missing {len(final_unmatched)} tracking(s). Saved to: {miss_path}")
         else:
-            print("[YDD] ✅ All refs matched by API/cache.")
+            print("[YDD] ✅ All trackings matched!")
 
-        # store stats for caller/UI/tests
+        # Enhanced statistics
         self.api_stats = {
-            "total_refs": total_refs,
-            "cached_hits": cached_hits,
-            "queried": len(to_query),
-            "api_items": len(api_items),
-            "mapped_final": len(self.ref_to_cust),
-            "missing_count": len(missing),
-            "missing_sample": missing[:10],  # a peek
-            "error": error_msg,
+            "total_trackings": total_trackings,
+            "cache_hits": cache_hits,
+            "ref_based_matches": ref_based_matches,
+            "two_step_matches": two_step_matches,
+            "total_new_matches": len(all_new_mappings),
+            "final_mapped": len(self.trk_to_cust),
+            "missing_count": len(final_unmatched),
+            "missing_sample": final_unmatched[:10],
+            "workflow_steps": {
+                "cache_hit_rate": f"{cache_hits / total_trackings * 100:.1f}%" if total_trackings > 0 else "0%",
+                "ref_success_rate": f"{ref_based_matches / len(unmatched_trackings) * 100:.1f}%" if unmatched_trackings else "0%",
+                "two_step_success_rate": f"{two_step_matches / len(still_unmatched) * 100:.1f}%" if still_unmatched else "0%",
+            }
         }
+
+        print(f"\n[YDD] ✅ Enhanced workflow complete!")
+        print(f"[YDD] Final stats: {cache_hits} cached + {len(all_new_mappings)} new = {len(self.trk_to_cust)} total mappings")
 
     # ---------------- loader switch ----------------
     def _load_mapping(self) -> None:
@@ -797,18 +1250,18 @@ class UpsCustomerMatcher:
             self._load_mapping_api()
         else:
             self._load_mapping_manual()
-        # For debugging: dump ref_to_cust mapping
+        # For debugging: dump trk_to_cust mapping
         if FLAG_DEBUG and self.use_api:
             pd.DataFrame([
-                {"danhao": k, "cust_id": v[0], "lead_shipment": v[1]}
-                for k, v in self.ref_to_cust.items()
-            ]).to_excel("output/ref_to_cust_check.xlsx", index=False)
-            print(f"[DEBUG] ref_to_cust mapping saved to output/ref_to_cust_check.xlsx")
+                {"tracking": k, "cust_id": v[0], "transfer_no": v[1]}
+                for k, v in self.trk_to_cust.items()
+            ]).to_excel("output/trk_to_cust_check.xlsx", index=False)
+            print(f"[DEBUG] trk_to_cust mapping saved to output/trk_to_cust_check.xlsx")
 
     # ---------------- main workflow ----------------
     def match_customers(self) -> None:
         # ensure mappings are ready
-        if not (self.dict_chrg and self.dict_pickup and self.dict_ar) and not self.ref_to_cust and not self.trk_to_cust:
+        if not (self.dict_chrg and self.dict_pickup and self.dict_ar) and not self.trk_to_cust:
             self._load_mapping()
 
         # 0) pre-assign specials by account
@@ -844,20 +1297,29 @@ class UpsCustomerMatcher:
                 continue
 
             if self.use_api:
-                danhao = str(row.get("Shipment Reference Number 1", "") or "").strip()
+                # Enhanced tracking-based matching workflow
+                trk_num = str(row.get("Tracking Number", "") or "").strip()
+                
                 # Priority: if this is a pickup charge, prefer the Pickups.csv mapping for the account
                 # This prevents the YDD API/cache from overriding the intended pickup-account mapping
                 if category_en in ["Daily Pickup", "Daily Pickup - Fuel"] and row["Account Number"] in self.dict_pickup:
                     cust_id = self.dict_pickup.get(row["Account Number"], {}).get("Cust.ID", self.DEFAULT_CUST_ID)
+                    exception_flag = True # Manual import is always needed for pickup charges
                     lead_shipment = self._best_tracking_for_row(row)
-                elif not is_blank(danhao) and danhao in self.ref_to_cust and row["Account Number"] not in self.excluded_from_exception:
-                    cust_id, chosen_trk = (v.replace(" ", "") for v in self.ref_to_cust[danhao])
+                elif not is_blank(trk_num) and trk_num in self.trk_to_cust and row["Account Number"] not in self.excluded_from_exception:
+                    cust_id, chosen_trk = self.trk_to_cust[trk_num]
+                    # Clean whitespace from customer ID and tracking number
+                    if isinstance(cust_id, str):
+                        cust_id = cust_id.strip()
+                    if isinstance(chosen_trk, str):
+                        chosen_trk = chosen_trk.strip()
                     lead_shipment = chosen_trk if not is_blank(chosen_trk) else self._best_tracking_for_row(row)
                 else:
                     cust_id = self._exception_handler(row)
                     exception_flag = True
                     lead_shipment = self._best_tracking_for_row(row)
             else:
+                # Legacy mode: direct tracking lookup without API enhancement
                 trk_num = str(row.get("Tracking Number", "") or "")
                 if trk_num in self.trk_to_cust:
                     cust_id, lead_shipment = self.trk_to_cust[trk_num]
@@ -1055,7 +1517,9 @@ class UpsCustomerMatcher:
         output_template["转单号"] = df_exceptions["Lead Shipment Number"].fillna("UNKNOWN").astype(str)
         output_template["承运商子单号"] = df_exceptions["Tracking Number"].fillna("UNKNOWN").astype(str)
         output_template["客户单号(文本格式)"] = (
-            df_exceptions["Shipment Reference Number 1"].fillna("NoRef").astype(str) + "-" +
+            df_exceptions["Shipment Reference Number 1"].fillna("NoRef").astype(str)
+            .str.replace(" ", "", regex=False)  # Remove all spaces
+            .str.replace(",", "_", regex=False) + "-" +  # Replace commas with underscores
             df_exceptions["Lead Shipment Number"].fillna("UNKNOWN").astype(str)
         ).str[:34]        
         output_template["收货渠道"] = "UPS Exception Handling"
