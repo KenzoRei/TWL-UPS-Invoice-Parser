@@ -29,7 +29,14 @@ class FileChooser:
             try:
                 import tkinter as tk
                 from tkinter import filedialog
-                root = tk.Tk(); root.withdraw()
+                root = tk.Tk()
+                root.withdraw()
+                
+                # Force dialog to appear on top
+                root.attributes('-topmost', True)
+                root.focus_force()
+                root.lift()
+                
                 filetypes = [(p, p) for p in patterns] or [("All files", "*.*")]
                 init = str(self.initial_dir)
                 if allow_multiple:

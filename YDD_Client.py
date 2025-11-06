@@ -104,8 +104,8 @@ class YDDClient:
 # ------- convenience mappers for your parser -------
 
 def select_tracking(d: dict) -> str:
-    """Prefer 转单号→UPS shipment id→17单号 as the tracking/lead id."""
-    for k in ("zhuanDanHao", "upsShipmentId", "seventeenNo"):
+    """Prefer 转单号→UPS shipment id→17单号→queryBillNo→carrierNo as the tracking/lead id."""
+    for k in ("zhuanDanHao", "queryBillNo", "carrierNo", "upsShipmentId", "seventeenNo"):
         v = str(d.get(k, "")).strip()
         if v:
             return v

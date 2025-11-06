@@ -3,6 +3,7 @@ from __future__ import annotations
 # Standard library
 import csv
 import datetime
+import functools
 import logging
 import os
 import pickle
@@ -45,6 +46,67 @@ FLAG_API_USE = True
 YDD_USER = "5055457@qq.com"
 YDD_PASS = "Twc11434!"
 FLAG_DEBUG = False
+
+def retry_on_timeout(max_retries: int = 3, base_delay: float = 1.0, backoff_factor: float = 2.0, jitter: float = 0.5, timeout_increase: float = 1.5):
+    """
+    Decorator for retrying functions that may encounter timeout errors.
+    
+    Args:
+        max_retries: Maximum number of retry attempts
+        base_delay: Initial delay between retries (seconds)
+        backoff_factor: Multiplier for delay after each retry
+        jitter: Random jitter factor (0-1) to avoid thundering herd
+        timeout_increase: Factor to increase timeout on retries
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            original_timeout = kwargs.get('timeout', 20)  # Default timeout
+            
+            for attempt in range(max_retries + 1):  # +1 for initial attempt
+                try:
+                    # Increase timeout progressively on retries
+                    if attempt > 0:
+                        kwargs['timeout'] = original_timeout * (timeout_increase ** attempt)
+                        if FLAG_DEBUG:
+                            print(f"[Retry] Attempt {attempt + 1}/{max_retries + 1} with timeout {kwargs['timeout']:.1f}s")
+                    
+                    return func(*args, **kwargs)
+                    
+                except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout, 
+                        requests.exceptions.Timeout) as e:
+                    last_exception = e
+                    
+                    if attempt >= max_retries:
+                        # Always show final failure message
+                        print(f"⚠️  API timeout after {max_retries + 1} attempts. Network may be unstable.")
+                        if FLAG_DEBUG:
+                            print(f"[Retry] All {max_retries + 1} attempts failed for {func.__name__}")
+                        raise e
+                    
+                    # Calculate delay with exponential backoff and jitter
+                    delay = base_delay * (backoff_factor ** attempt)
+                    jitter_amount = delay * jitter * random.random()
+                    total_delay = delay + jitter_amount
+                    
+                    # Always show retry warning to user
+                    print(f"⚠️  Network timeout (attempt {attempt + 1}/{max_retries + 1}), retrying in {total_delay:.1f}s...")
+                    
+                    if FLAG_DEBUG:
+                        print(f"[Retry] {func.__name__} detailed timeout info - retrying in {total_delay:.2f}s...")
+                    
+                    time.sleep(total_delay)
+                    
+                except Exception as e:
+                    # Non-timeout exceptions are not retried
+                    raise e
+                    
+            # This should never be reached, but just in case
+            raise last_exception
+            
+        return wrapper
+    return decorator
 
 def is_blank(val) -> bool:
     """
@@ -96,8 +158,8 @@ class UpsInvLoader:
         self.batch_number: str | None = None
         self._chooser = FileChooser(self.input_dir)
 
-    def choose_files_dialog(self) -> list[Path]:
-        self.invoices = self._chooser.pick_csvs(interactive=True, cli_fallback=True)
+    def choose_files_dialog(self, *, cli_fallback: bool = True) -> list[Path]:
+        self.invoices = self._chooser.pick_csvs(interactive=True, cli_fallback=cli_fallback)
         return self.invoices
 
     def choose_files_cli(self) -> list[Path]:
@@ -213,16 +275,43 @@ class UpsInvLoader:
         """
         Archive all selected CSV files into:
             <project_root>/data/raw_invoices[/<batch_number>]
+        If files are already from archive folder, skip archiving process.
         """
         if not self.invoices:
             raise ValueError("No files selected to archive. Run choose_files_dialog() first.")
 
         base_path = Path(__file__).resolve().parent / "data" / "raw_invoices"
+        
+        # Check if all selected files are already from archive folders
+        files_from_archive = []
+        files_to_archive = []
+        
+        for file in self.invoices:
+            try:
+                # Check if file path contains the archive base path
+                if base_path in file.resolve().parents or file.resolve().parent == base_path:
+                    files_from_archive.append(file)
+                else:
+                    files_to_archive.append(file)
+            except Exception:
+                # If path resolution fails, treat as non-archive file
+                files_to_archive.append(file)
+        
+        # If all files are from archive, skip archiving entirely
+        if files_from_archive and not files_to_archive:
+            print(f"📁 All {len(files_from_archive)} selected files are from archive folders - skipping archive process")
+            return
+        
+        # If some files are from archive, show mixed selection info
+        if files_from_archive:
+            print(f"📁 {len(files_from_archive)} files already in archive, {len(files_to_archive)} files to be archived")
+        
+        # Proceed with archiving for non-archive files
         out_path = base_path / str(self.batch_number) if self.batch_number else base_path
         out_path.mkdir(parents=True, exist_ok=True)
 
         copied_count = 0
-        for file in self.invoices:
+        for file in files_to_archive:
             destination = out_path / file.name
             # Skip copying if the file is already in the destination (same path)
             if file.resolve() != destination.resolve():
@@ -231,8 +320,10 @@ class UpsInvLoader:
 
         if copied_count > 0:
             print(f"📁 Archived {copied_count} files to {out_path}")
+        elif files_to_archive:
+            print(f"📁 All {len(files_to_archive)} files were already in {out_path}")
         else:
-            print(f"📁 All {len(self.invoices)} files were already in {out_path}")
+            print(f"📁 No new files to archive")
     
     def run_import(
         self,
@@ -248,12 +339,15 @@ class UpsInvLoader:
         # 1) choose
         if interactive:
             try:
-                self.choose_files_dialog()
+                self.choose_files_dialog(cli_fallback=cli_fallback)
             except Exception:
                 if not cli_fallback:
                     raise
                 self.choose_files_cli()
         if not self.invoices:
+            if interactive and not cli_fallback:
+                # User likely clicked Cancel in dialog - provide friendly message
+                print("❌ File selection was cancelled. No files were selected.")
             raise ValueError("No CSV files selected.")
 
         # 2) validate
@@ -370,7 +464,8 @@ class UpsInvNormalizer:
         for file in self.file_list:
             last_err = None
             for enc in tried_encs:
-                print(f"[DEBUG] Trying to load {file.name} with encoding {enc}...")
+                if FLAG_DEBUG:
+                    print(f"[DEBUG] Trying to load {file.name} with encoding {enc}...")
                 try:
                     # First try with original dtype mapping
                     df = pd.read_csv(
@@ -383,7 +478,8 @@ class UpsInvNormalizer:
                         encoding_errors="strict",     # or "replace" to keep going
                     )
                     # success -> stop trying encodings
-                    print(f"✓ Loaded {file.name} with encoding {enc}")
+                    if FLAG_DEBUG:
+                        print(f"[DEBUG] Successfully loaded {file.name} with encoding {enc}")
                     break
                 except (UnicodeDecodeError, ValueError) as e:
                     if isinstance(e, UnicodeDecodeError):
@@ -391,7 +487,8 @@ class UpsInvNormalizer:
                         continue
                     elif isinstance(e, ValueError) and "cannot safely convert" in str(e):
                         # Try loading without dtype constraints for problematic columns
-                        print(f"[DEBUG] Dtype conversion error, trying flexible loading...")
+                        if FLAG_DEBUG:
+                            print(f"[DEBUG] Dtype conversion error, trying flexible loading...")
                         try:
                             df = pd.read_csv(
                                 file,
@@ -404,7 +501,8 @@ class UpsInvNormalizer:
                             )
                             # Convert types manually after loading
                             self._convert_dtypes_safely(df)
-                            print(f"✓ Loaded {file.name} with encoding {enc} (flexible mode)")
+                            if FLAG_DEBUG:
+                                print(f"[DEBUG] Loaded {file.name} with encoding {enc} (flexible mode)")
                             break
                         except UnicodeDecodeError:
                             last_err = e
@@ -422,7 +520,8 @@ class UpsInvNormalizer:
                     encoding_errors="replace",  # keeps data, replaces bad bytes
                 )
                 self._convert_dtypes_safely(df)
-                print(f"! Loaded {file.name} with latin1 (replacement used)")
+                if FLAG_DEBUG:
+                    print(f"[DEBUG] Loaded {file.name} with latin1 (replacement used)")
 
             # keep only flagged columns
             df = df.loc[:, self.filtered_col_name]
@@ -432,6 +531,9 @@ class UpsInvNormalizer:
                 df[date_col] = pd.to_datetime(df[date_col], format="mixed", errors="coerce")
 
             self.raw_dataframes.append(df)
+        
+        # Overall loading summary
+        print(f"✅ Successfully loaded {len(self.raw_dataframes)} invoice files")
 
     def merge_invoices(self):
         """Merge loaded DataFrames into one."""
@@ -626,8 +728,8 @@ class UpsCustomerMatcher:
             
             if tracking and cust_id:  # Only add valid entries
                 cache_dict[tracking] = (cust_id, transfer_no)
-                
-        print(f"[Cache] Loaded {len(cache_dict)} mappings from cache")
+        if FLAG_DEBUG:
+            print(f"[Debug] Loaded {len(cache_dict)} mappings from cache")
         return cache_dict
         
     def _update_trk2cust_cache(self, new_mappings: Dict[str, Tuple[str, str]]) -> None:
@@ -660,10 +762,9 @@ class UpsCustomerMatcher:
             
         cache_df = pd.DataFrame(cache_rows)
         
-        # Check cache size (basic check without archiving for now)
+        # Check cache size and auto-archive if needed
         if len(cache_df) > self.max_cache_records:
-            print(f"[Cache] WARNING: Cache size {len(cache_df)} exceeds limit {self.max_cache_records}")
-            print(f"[Cache] TODO: Implement archiving (Phase 1b)")
+            cache_df = self._archive_cache_overflow(cache_df)
             
         # Save updated cache
         try:
@@ -671,10 +772,80 @@ class UpsCustomerMatcher:
             temp_file = self.cache_file.with_suffix('.tmp')
             cache_df.to_csv(temp_file, index=False, encoding='utf-8-sig')
             temp_file.replace(self.cache_file)
-            print(f"[Cache] Updated cache: {len(cache_df)} total records (+{updated_count} new)")
+            if FLAG_DEBUG:
+                print(f"[Debug] Updated cache: {len(cache_df)} total records (+{updated_count} new)")
         except Exception as e:
             print(f"[Cache] Failed to save cache: {e}")
             
+    def _archive_cache_overflow(self, cache_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Archive overflow cache records when limit is exceeded
+        
+        Args:
+            cache_df: Current cache DataFrame
+            
+        Returns:
+            pd.DataFrame: Trimmed cache DataFrame (most recent records)
+        """
+        if len(cache_df) <= self.max_cache_records:
+            return cache_df
+            
+        print(f"[Cache] Cache size {len(cache_df)} exceeds limit {self.max_cache_records}")
+        print(f"[Cache] Starting automatic archiving process...")
+        
+        try:
+            # Create archive directory if needed
+            self.archive_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Sort by created_at to keep most recent records
+            if 'created_at' in cache_df.columns:
+                cache_df_sorted = cache_df.sort_values('created_at', ascending=False)
+            else:
+                # If no timestamp, keep last records (DataFrame order)
+                cache_df_sorted = cache_df.copy()
+                
+            # Split into keep vs archive
+            keep_records = self.max_cache_records // 2  # Keep 50K most recent
+            cache_to_keep = cache_df_sorted.head(keep_records).copy()
+            cache_to_archive = cache_df_sorted.tail(len(cache_df_sorted) - keep_records).copy()
+            
+            # Generate archive filename with timestamp
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            archive_filename = f"trk_to_cust_archive_{timestamp}.csv"
+            archive_path = self.archive_dir / archive_filename
+            
+            # Save archived records
+            cache_to_archive.to_csv(archive_path, index=False, encoding='utf-8-sig')
+            
+            print(f"[Cache] ✅ Archived {len(cache_to_archive)} old records to: {archive_filename}")
+            print(f"[Cache] ✅ Keeping {len(cache_to_keep)} most recent records in active cache")
+            
+            # Update archive statistics
+            archive_stats = {
+                'archive_date': timestamp,
+                'archived_count': len(cache_to_archive),
+                'kept_count': len(cache_to_keep),
+                'archive_file': archive_filename
+            }
+            
+            # Optional: Save archive metadata
+            metadata_path = self.archive_dir / "archive_log.csv"
+            metadata_df = pd.DataFrame([archive_stats])
+            
+            if metadata_path.exists():
+                # Append to existing log
+                existing_metadata = pd.read_csv(metadata_path)
+                metadata_df = pd.concat([existing_metadata, metadata_df], ignore_index=True)
+                
+            metadata_df.to_csv(metadata_path, index=False, encoding='utf-8-sig')
+            
+            return cache_to_keep
+            
+        except Exception as e:
+            print(f"[Cache] ❌ Archive process failed: {e}")
+            print(f"[Cache] ❌ Continuing with full cache (may impact performance)")
+            return cache_df
+
     def _migrate_legacy_cache(self) -> Dict[str, Tuple[str, str]]:
         """Migrate data from old ydd_ref_map.csv to new cache format (one-time migration)"""
         legacy_mappings = {}
@@ -706,6 +877,124 @@ class UpsCustomerMatcher:
                 
         return legacy_mappings
 
+    def manage_cache(self, action: str = "status") -> dict:
+        """
+        Manual cache management interface
+        
+        Args:
+            action: "status", "archive", "clear", "stats"
+            
+        Returns:
+            dict: Cache management results and statistics
+        """
+        if not self.use_cache:
+            return {"error": "Cache is disabled (use_cache=False)"}
+            
+        try:
+            # Ensure cache structure exists
+            self._ensure_cache_structure()
+            
+            if action == "status":
+                # Get current cache status
+                if not self.cache_file.exists():
+                    return {
+                        "status": "no_cache",
+                        "message": "Cache file does not exist",
+                        "cache_file": str(self.cache_file)
+                    }
+                    
+                try:
+                    cache_df = pd.read_csv(self.cache_file, encoding='utf-8-sig')
+                    total_records = len(cache_df)
+                    size_mb = self.cache_file.stat().st_size / (1024 * 1024)
+                    
+                    # Check for archive files
+                    archive_files = list(self.archive_dir.glob("trk_to_cust_archive_*.csv"))
+                    
+                    return {
+                        "status": "active",
+                        "total_records": total_records,
+                        "max_records": self.max_cache_records,
+                        "size_mb": round(size_mb, 2),
+                        "usage_percent": round((total_records / self.max_cache_records) * 100, 1),
+                        "archive_files": len(archive_files),
+                        "needs_archiving": total_records > self.max_cache_records,
+                        "cache_file": str(self.cache_file),
+                        "archive_dir": str(self.archive_dir)
+                    }
+                except Exception as e:
+                    return {"error": f"Failed to read cache: {e}"}
+                    
+            elif action == "archive":
+                # Force archive current cache
+                if not self.cache_file.exists():
+                    return {"error": "Cache file does not exist"}
+                    
+                cache_df = pd.read_csv(self.cache_file, encoding='utf-8-sig')
+                original_size = len(cache_df)
+                
+                if original_size <= self.max_cache_records // 2:
+                    return {"message": f"Cache size ({original_size}) is already below archive threshold"}
+                    
+                # Force archive
+                archived_df = self._archive_cache_overflow(cache_df)
+                
+                return {
+                    "status": "archived",
+                    "original_records": original_size,
+                    "remaining_records": len(archived_df),
+                    "archived_records": original_size - len(archived_df)
+                }
+                
+            elif action == "clear":
+                # Clear entire cache (use with caution)
+                if self.cache_file.exists():
+                    backup_name = f"trk_to_cust_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                    backup_path = self.archive_dir / backup_name
+                    
+                    # Backup before clearing
+                    import shutil
+                    shutil.copy2(self.cache_file, backup_path)
+                    
+                    # Create fresh cache
+                    self._create_trk2cust_cache()
+                    
+                    return {
+                        "status": "cleared",
+                        "message": "Cache cleared successfully",
+                        "backup_created": str(backup_path)
+                    }
+                else:
+                    return {"message": "Cache file did not exist"}
+                    
+            elif action == "stats":
+                # Detailed cache statistics
+                stats = self.manage_cache("status")
+                
+                if "error" in stats:
+                    return stats
+                    
+                # Add timing and performance stats
+                if self.cache_file.exists():
+                    mtime = datetime.datetime.fromtimestamp(self.cache_file.stat().st_mtime)
+                    stats["last_modified"] = mtime.isoformat()
+                    stats["last_modified_ago"] = str(datetime.datetime.now() - mtime)
+                
+                # Archive directory stats
+                if self.archive_dir.exists():
+                    archive_files = list(self.archive_dir.glob("*.csv"))
+                    total_archive_size = sum(f.stat().st_size for f in archive_files)
+                    stats["archive_files_detail"] = len(archive_files)
+                    stats["archive_size_mb"] = round(total_archive_size / (1024 * 1024), 2)
+                    
+                return stats
+                
+            else:
+                return {"error": f"Unknown action: {action}. Use 'status', 'archive', 'clear', or 'stats'"}
+                
+        except Exception as e:
+            return {"error": f"Cache management failed: {e}"}
+
     def set_mapping_file(self, path: Path) -> None:
         self.mapping_file = Path(path) if path else None
 
@@ -715,7 +1004,14 @@ class UpsCustomerMatcher:
             from tkinter import filedialog
         except Exception as e:
             raise RuntimeError("tkinter is not available for file selection.") from e
-        root = tk.Tk(); root.withdraw()
+        root = tk.Tk()
+        root.withdraw()
+        
+        # Force dialog to appear on top
+        root.attributes('-topmost', True)
+        root.focus_force()
+        root.lift()
+        
         fp = filedialog.askopenfilename(
             title="选择数据列表*.xlsx 映射文件 / Select mapping file",
             filetypes=[("Excel files", "*.xlsx *.xls")],
@@ -774,6 +1070,41 @@ class UpsCustomerMatcher:
         self._ydd_client = YDDClient(base=base, username=user, password=pwd)
         return self._ydd_client
 
+    def _call_ydd_api_with_retry(self, api_method, *args, **kwargs):
+        """
+        Wrapper for YDD API calls with enhanced retry logic for timeout handling.
+        """
+        @retry_on_timeout(max_retries=3, base_delay=2.0, backoff_factor=2.0, jitter=0.3)
+        def _api_call_with_timeout(timeout=30):
+            # Set timeout for the underlying requests in YDD client
+            original_timeout = getattr(api_method.__self__, '_timeout', None)
+            try:
+                # Try to set timeout on the client if supported
+                if hasattr(api_method.__self__, '_timeout'):
+                    api_method.__self__._timeout = timeout
+                elif hasattr(api_method.__self__, 'session'):
+                    # If there's a session, set timeout there
+                    api_method.__self__.session.timeout = timeout
+                
+                return api_method(*args, **kwargs)
+            finally:
+                # Restore original timeout
+                if original_timeout is not None and hasattr(api_method.__self__, '_timeout'):
+                    api_method.__self__._timeout = original_timeout
+
+        try:
+            return _api_call_with_timeout()
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout, 
+                requests.exceptions.Timeout) as e:
+            print(f"❌ YDD API connection failed after multiple retries")
+            print(f"💡 Possible solutions:")
+            print(f"   • Check internet connection")
+            print(f"   • Verify twc.itdida.com is accessible")
+            print(f"   • Try again in a few minutes (server may be busy)")
+            if FLAG_DEBUG:
+                print(f"[Debug] Full error: {e}")
+            raise e
+
     def _collect_danhaos_with_tracking(self) -> tuple[list[str], dict[str, str]]:
         """
         Build:
@@ -823,7 +1154,7 @@ class UpsCustomerMatcher:
         specials = set(SPECIAL_ACCT_TO_CUST.keys())
 
         if FLAG_DEBUG:
-            print(f"[DEBUG] Collecting trk→ref mappings, excluding specials: {specials}")
+            print(f"[DEBUG] Collecting trk->ref mappings, excluding specials: {specials}")
 
         # Filter out special accounts
         mask = ~df["Account Number"].astype(str).isin(specials)
@@ -869,8 +1200,9 @@ class UpsCustomerMatcher:
         
         if not clean_refs:
             return {}
-
-        print(f"[YDD] Querying {len(clean_refs)} refs via query_yundan_detail...")
+        
+        if FLAG_DEBUG:
+            print(f"[Debug] Querying {len(clean_refs)} refs via query_yundan_detail...")
 
         try:
             client = self._ensure_ydd_client()
@@ -883,17 +1215,19 @@ class UpsCustomerMatcher:
                     workers=self.ydd_threads,
                 )
             else:
-                api_items = client.query_yundan_detail(
+                # Use retry wrapper for single-threaded API calls
+                api_items = self._call_ydd_api_with_retry(
+                    client.query_yundan_detail,
                     clean_refs, 
                     batch_size=min(self.ydd_batch_size, 10), 
                     sleep=0.01
                 )
 
-            # Convert API response to ref → cust mapping
+            # Convert API response to ref -> cust mapping
             from YDD_Client import build_ref_to_cust
             ref_to_cust = build_ref_to_cust(api_items)
-
-            print(f"[YDD] query_yundan_detail: {len(api_items)} API items → {len(ref_to_cust)} mappings")
+            if FLAG_DEBUG:
+                print(f"[Debug] query_yundan_detail: {len(api_items)} API items -> {len(ref_to_cust)} mappings")
 
             return ref_to_cust
 
@@ -913,9 +1247,11 @@ class UpsCustomerMatcher:
                 if len(clean_refs) > 1:
                     print(f"[YDD] Attempting smaller batch retry...")
                     try:
-                        # Try first reference alone
+                        # Try first reference alone with retry
                         client = self._ensure_ydd_client()
-                        test_items = client.query_yundan_detail([clean_refs[0]], batch_size=1)
+                        test_items = self._call_ydd_api_with_retry(
+                            client.query_yundan_detail, [clean_refs[0]], batch_size=1
+                        )
                         print(f"[YDD] ✅ Single reference test successful")
                         
                         # If single works, try smaller batches
@@ -923,7 +1259,9 @@ class UpsCustomerMatcher:
                         all_items = []
                         for ref in clean_refs[:3]:  # Test first 3 only
                             try:
-                                items = client.query_yundan_detail([ref], batch_size=1)
+                                items = self._call_ydd_api_with_retry(
+                                    client.query_yundan_detail, [ref], batch_size=1
+                                )
                                 all_items.extend(items)
                             except Exception as single_e:
                                 print(f"[YDD] ❌ Problematic ref: {ref} - {single_e}")
@@ -958,13 +1296,15 @@ class UpsCustomerMatcher:
         if not clean_trackings:
             return {}
 
-        print(f"[YDD] Querying {len(clean_trackings)} trackings via query_piece_detail...")
+        if FLAG_DEBUG:
+            print(f"[Debug] Querying {len(clean_trackings)} trackings via query_piece_detail...")
 
         try:
             client = self._ensure_ydd_client()
 
-            # Query piece details
-            api_items = client.query_piece_detail(
+            # Query piece details with retry wrapper
+            api_items = self._call_ydd_api_with_retry(
+                client.query_piece_detail,
                 clean_trackings, 
                 batch_size=min(self.ydd_batch_size, 10), 
                 sleep=0.01
@@ -982,7 +1322,7 @@ class UpsCustomerMatcher:
                     trk_to_ref[trk] = ke_hu_dan_hao
 
             if FLAG_DEBUG:
-                print(f"[Debug] query_piece_detail: {len(api_items)} API items → {len(trk_to_ref)} trk→ref mappings")
+                print(f"[Debug] query_piece_detail: {len(api_items)} API items -> {len(trk_to_ref)} trk->ref mappings")
 
             return trk_to_ref
 
@@ -1004,13 +1344,14 @@ class UpsCustomerMatcher:
         if not trackings:
             return {}
 
-        print(f"[YDD] Starting two-step matching for {len(trackings)} trackings...")
+        if FLAG_DEBUG:
+            print(f"[Debug] Starting two-step matching for {len(trackings)} trackings...")
 
         # Step 1: tracking → ref via piece_detail
         trk_to_ref = self._trk2ref_matching(trackings)
 
         if not trk_to_ref and FLAG_DEBUG:
-            print("[Debug] Two-step matching: No tracking→ref mappings found")
+            print("[Debug] Two-step matching: No tracking->ref mappings found")
             return {}
 
         # Step 2: ref → cust via yundan_detail  
@@ -1027,7 +1368,8 @@ class UpsCustomerMatcher:
             if ref in ref_to_cust:
                 trk_to_cust[trk] = ref_to_cust[ref]
 
-        print(f"[YDD] Two-step matching: {len(trk_to_cust)} final tracking→cust mappings")
+        if FLAG_DEBUG:
+            print(f"[Debug] Two-step matching: {len(trk_to_cust)} final tracking->cust mappings")
 
         return trk_to_cust
 
@@ -1046,7 +1388,7 @@ class UpsCustomerMatcher:
 
         auth_header = {"Authorization": f"Bearer {client.token}"}
         base_url = client.base.rstrip("/") + "/queryYunDanDetail"
-        default_timeout = 20
+        default_timeout = 30  # Increased from 20 to 30 seconds
 
         def fetch_chunk(chunk: List[str]) -> List[dict]:
             params = {"danHaos": ",".join(chunk)}
@@ -1074,10 +1416,25 @@ class UpsCustomerMatcher:
                         return []
                     data = js.get("data") or []
                     return data if isinstance(data, list) else []
-                except requests.RequestException:
+                except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout, 
+                        requests.exceptions.Timeout) as e:
+                    if attempt >= max_retries:
+                        print(f"⚠️  API batch timeout after {max_retries + 1} attempts. Continuing with other batches...")
+                        if FLAG_DEBUG:
+                            print(f"[YDD] Detailed timeout error: {e}")
+                        raise
+                    sleep = (base_sleep * (2 ** attempt)) + random.uniform(0, jitter)
+                    print(f"⚠️  Batch timeout (attempt {attempt + 1}/{max_retries + 1}), retrying in {sleep:.1f}s...")
+                    if FLAG_DEBUG:
+                        print(f"[YDD] Detailed retry info: {sleep:.2f}s delay")
+                    time.sleep(sleep)
+                    attempt += 1
+                except requests.RequestException as e:
                     if attempt >= max_retries:
                         raise
                     sleep = (base_sleep * (2 ** attempt)) + random.uniform(0, jitter)
+                    if FLAG_DEBUG:
+                        print(f"[YDD] Request error on attempt {attempt + 1}: {e}, retrying in {sleep:.2f}s...")
                     time.sleep(sleep)
                     attempt += 1
 
@@ -1135,11 +1492,15 @@ class UpsCustomerMatcher:
         """
         client = self._ensure_ydd_client()
 
+        # Inform user about potential network delays
+        print("Connecting to YDD API... (Network timeouts will be automatically retried)")
+
         # Login timing
         t0 = time.perf_counter()
         token = client.login()
         t1 = time.perf_counter()
-        print(f"[YDD] Login OK in {t1 - t0:0.3f}s (token len={len(token)})")
+        if FLAG_DEBUG:
+            print(f"[Debug] Login OK in {t1 - t0:0.3f}s (token len={len(token)})")
 
         # ===== Step 1: Load cache & collect tracking numbers =====
         print("\n[YDD] Step 1: Loading cache and collecting tracking numbers...")
@@ -1222,7 +1583,8 @@ class UpsCustomerMatcher:
             pd.Series(final_unmatched, name="tracking").to_csv(miss_path, index=False, encoding="utf-8-sig")            
             print(f"[YDD] ❌ Missing {len(final_unmatched)} tracking(s). Saved to: {miss_path}")
         else:
-            print("[YDD] ✅ All trackings matched!")
+            print("[YDD] All trackings matched!")
+        final_mapped = cache_hits + ref_based_matches + two_step_matches
 
         # Enhanced statistics
         self.api_stats = {
@@ -1231,18 +1593,20 @@ class UpsCustomerMatcher:
             "ref_based_matches": ref_based_matches,
             "two_step_matches": two_step_matches,
             "total_new_matches": len(all_new_mappings),
-            "final_mapped": len(self.trk_to_cust),
+            "final_mapped": final_mapped,
             "missing_count": len(final_unmatched),
             "missing_sample": final_unmatched[:10],
             "workflow_steps": {
                 "cache_hit_rate": f"{cache_hits / total_trackings * 100:.1f}%" if total_trackings > 0 else "0%",
                 "ref_success_rate": f"{ref_based_matches / len(unmatched_trackings) * 100:.1f}%" if unmatched_trackings else "0%",
                 "two_step_success_rate": f"{two_step_matches / len(still_unmatched) * 100:.1f}%" if still_unmatched else "0%",
+                "overall_success_rate": f"{final_mapped / total_trackings * 100:.1f}%" if total_trackings > 0 else "0%",
+                "missing_rate": f"{len(final_unmatched) / total_trackings * 100:.1f}%" if total_trackings > 0 else "0%"
             }
         }
 
-        print(f"\n[YDD] ✅ Enhanced workflow complete!")
-        print(f"[YDD] Final stats: {cache_hits} cached + {len(all_new_mappings)} new = {len(self.trk_to_cust)} total mappings")
+        print(f"\n[YDD] Enhanced workflow complete!")
+        print(f"[YDD] Final stats: {cache_hits} cached + {len(all_new_mappings)} new = {final_mapped} total mappings")
 
     # ---------------- loader switch ----------------
     def _load_mapping(self) -> None:
@@ -1336,7 +1700,7 @@ class UpsCustomerMatcher:
 
             # backfill when needed
             if is_blank(self.df.at[idx, "Lead Shipment Number"]) and cust_id != self.DEFAULT_CUST_ID:
-                ls = str(row.get("Invoice Number", "")) + "-" + str(category_en).replace(" ", "_")
+                ls = str(row.get("Invoice Number", "")) + "-Daily_Pickup"
                 self.df.at[idx, "Lead Shipment Number"] = ls
                 self.df.at[idx, "Tracking Number"] = ls
                 self.df.at[idx, "Shipment Reference Number 1"] = ls
@@ -1366,16 +1730,28 @@ class UpsCustomerMatcher:
         # optional: api stats summary
         if self.use_api:
             s = self.api_stats or {}
-            print("\n[YDD] API summary")
+            print("\n[YDD] Enhanced API Workflow Summary")
             print("-------------------------------------------------")
-            print(f"Refs total     : {s.get('total_refs', 0)}")
-            print(f"Cached hits    : {s.get('cached_hits', 0)}")
-            print(f"Queried        : {s.get('queried', 0)}")
-            print(f"API items      : {s.get('api_items', 0)}")
-            print(f"Mapped (final) : {s.get('mapped_final', 0)}")
-            print(f"Missing        : {s.get('missing_count', 0)}")
+            print(f"Total trackings  : {s.get('total_trackings', 0)}")
+            print(f"Cache hits       : {s.get('cache_hits', 0)}")
+            print(f"Ref-based matches: {s.get('ref_based_matches', 0)}")
+            print(f"Two-step matches : {s.get('two_step_matches', 0)}")
+            print(f"Total new matches: {s.get('total_new_matches', 0)}")
+            print(f"Final mapped     : {s.get('final_mapped', 0)}")
+            print(f"Missing          : {s.get('missing_count', 0)}")
+            
+            # Show workflow efficiency rates
+            workflow = s.get('workflow_steps', {})
+            if workflow:
+                print("\nWorkflow Efficiency:")
+                print(f"  Cache hit rate     : {workflow.get('cache_hit_rate', '0%')}")
+                print(f"  Ref success rate   : {workflow.get('ref_success_rate', '0%')}")
+                print(f"  Two-step success   : {workflow.get('two_step_success_rate', '0%')}")
+                print(f"  Overall success    : {workflow.get('overall_success_rate', '0%')}")
+                print(f"  Missing rate       : {workflow.get('missing_rate', '0%')}")
+            
             if s.get("error"):
-                print(f"Last error     : {s['error']}")
+                print(f"Last error       : {s['error']}")
 
     def get_matched_data(self) -> pd.DataFrame:
         return self.df
@@ -1516,12 +1892,27 @@ class UpsCustomerMatcher:
         output_template["客户代码"] = df_exceptions["cust_id"].fillna("F000999").astype(str)
         output_template["转单号"] = df_exceptions["Lead Shipment Number"].fillna("UNKNOWN").astype(str)
         output_template["承运商子单号"] = df_exceptions["Tracking Number"].fillna("UNKNOWN").astype(str)
-        output_template["客户单号(文本格式)"] = (
+        # Conditional logic for 客户单号(文本格式)
+        # Case 1: When Lead Shipment Number == Shipment Reference Number 1
+        mask_same_ref = (df_exceptions["Lead Shipment Number"].fillna("") == 
+                        df_exceptions["Shipment Reference Number 1"].fillna(""))
+        
+        # For matching rows: use only cleaned Shipment Reference Number 1
+        ref_only = (
+            df_exceptions["Shipment Reference Number 1"].fillna("NoRef").astype(str)
+            .str.replace(" ", "", regex=False)  # Remove all spaces
+            .str.replace(",", "_", regex=False)  # Replace commas with underscores
+        )        
+        # For non-matching rows: use original combined logic
+        ref_plus_lead = (
             df_exceptions["Shipment Reference Number 1"].fillna("NoRef").astype(str)
             .str.replace(" ", "", regex=False)  # Remove all spaces
             .str.replace(",", "_", regex=False) + "-" +  # Replace commas with underscores
             df_exceptions["Lead Shipment Number"].fillna("UNKNOWN").astype(str)
-        ).str[:34]        
+        )
+        
+        # Apply conditional logic and truncate to 34 characters
+        output_template["客户单号(文本格式)"] = ref_plus_lead.where(~mask_same_ref, ref_only).str[:34]        
         output_template["收货渠道"] = "UPS Exception Handling"
         output_template["目的地国家"] = "US"
         output_template["件数"] = 1
@@ -2228,7 +2619,7 @@ class UpsInvoiceExporter:
         self._split_costs()
         df = self.flat_charges.copy()
 
-        summary_invoice = df.groupby("Invoice Number")[["ap_amt", "ar_amt"]].sum().reset_index()
+        summary_invoice = df.groupby("Invoice Number")[["ap_amt"]].sum().reset_index()
         summary_customer = df.groupby("cust_id")[["ap_amt", "ar_amt"]].sum().reset_index()
         for cid in SPECIAL_CUSTOMERS:
             mask = summary_customer["cust_id"] == cid
@@ -2238,15 +2629,58 @@ class UpsInvoiceExporter:
                     summary_customer.loc[mask, "ap_amt"] * factor
                 ).round(2)
 
+        # Calculate grand totals
+        grand_ap_total = summary_invoice["ap_amt"].sum()
+        grand_ar_total = summary_customer["ar_amt"].sum() # Since there is a special ar rule for SPECIAL_CUSTOMERS
+
+        # Add Grand Total row to summary_invoice
+        grand_total_invoice_row = pd.DataFrame({
+            "Invoice Number": ["Grand Total"],
+            "ap_amt": [f"{grand_ap_total:.2f}"]
+        })
+        summary_invoice_with_total = pd.concat([summary_invoice, grand_total_invoice_row], ignore_index=True)
+
+        # Add Grand Total row to summary_customer
+        grand_total_customer_row = pd.DataFrame({
+            "cust_id": ["Grand Total"],
+            "ap_amt": [f"{grand_ap_total:.2f}"],
+            "ar_amt": [f"{grand_ar_total:.2f}"]
+        })
+
+        # Calculate YDD import totals (exclude special customers and empty cust_id which refer to general costs)
+        excluded_customers = set(SPECIAL_CUSTOMERS.keys()) | {"", "F000999"}  # Add default customer ID for general costs
+        ydd_summary = summary_customer[~summary_customer["cust_id"].isin(excluded_customers)]
+        ydd_ap_total = ydd_summary["ap_amt"].sum()
+        ydd_ar_total = ydd_summary["ar_amt"].sum()
+
+        ydd_total_row = pd.DataFrame({
+            "cust_id": ["YDD Import Total"],
+            "ap_amt": [f"{ydd_ap_total:.2f}"],
+            "ar_amt": [f"{ydd_ar_total:.2f}"]
+        })
+
+        summary_customer_with_totals = pd.concat([summary_customer, grand_total_customer_row, ydd_total_row], ignore_index=True)
+
+        # Prepare general cost dataframe with formatting
+        general_cost_display = self.general_cost_df[["Charge_Cate_CN", "ap_amt"]].copy()
+        general_cost_display["总应付金额"] = general_cost_display["ap_amt"].apply(lambda x: f"{x:.2f}")
+        general_cost_display = general_cost_display.rename(columns={"Charge_Cate_CN": "费用类型（中文）"})
+        general_cost_display = general_cost_display[["费用类型（中文）", "总应付金额"]].sort_values("总应付金额", ascending=False, key=lambda x: x.astype(float))
+
+        # Add total row for general costs
+        general_cost_total = self.general_cost_df["ap_amt"].sum()
+        general_total_row = pd.DataFrame({
+            "费用类型（中文）": ["Total"],
+            "总应付金额": [f"{general_cost_total:.2f}"]
+        })
+        general_cost_with_total = pd.concat([general_cost_display, general_total_row], ignore_index=True)
+
         output_file = self.output_path / "UPS_Invoice_Export.xlsx"
         with pd.ExcelWriter(output_file, engine="xlsxwriter") as writer:
             df.fillna("").replace("nan", "").to_excel(writer, sheet_name="Details", index=False)
-            summary_invoice.to_excel(writer, sheet_name="Summary by Invoice", index=False)
-            summary_customer.to_excel(writer, sheet_name="Summary by Customer", index=False)
-            (self.general_cost_df[["Charge_Cate_CN", "ap_amt"]]
-                .rename(columns={"Charge_Cate_CN": "费用类型（中文）", "ap_amt": "总应付金额"})
-                .sort_values("总应付金额", ascending=False)
-                .to_excel(writer, sheet_name="Summary for General Cost", index=False))
+            summary_invoice_with_total.to_excel(writer, sheet_name="Summary by Invoice", index=False)
+            summary_customer_with_totals.to_excel(writer, sheet_name="Summary by Customer", index=False)
+            general_cost_with_total.to_excel(writer, sheet_name="Summary for General Cost", index=False)
         print(f"📁 UPS invoice export saved to {output_file}")
 
     def _generate_special_customer_invoices(self):
