@@ -2849,6 +2849,9 @@ class UpsInvoiceExporter:
         self._generate_special_customer_invoices()
         self._generate_general_customer_invoices()
         
+        # Generate F000222 summary if F000222 invoice was created
+        self.generate_f000222_summary()
+        
     def _build_special_keys(self, matched_df: pd.DataFrame, cid: str):
         '''
         Build key sets from matched_df
@@ -3012,6 +3015,176 @@ class UpsInvoiceExporter:
         output_file = self.output_path / "Xero_AR_Template.csv"
         df[final_cols].to_csv(output_file, index=False)
         print(f"📁 Xero AR template saved to {output_file}")
+
+    # ----------------------
+    # F000222 Summary Generator
+    # ----------------------
+    def generate_f000222_summary(self):
+        """
+        Generate F000222 invoice summary Excel spreadsheet with:
+        1. Source data from F000222_{batch_number}.csv
+        2. Summary grouped by Invoice Number
+        3. AP Amount (Net Amount where Charge Description != "Payment Processing Fee")
+        4. Processing Fee Amount (Net Amount where Charge Description == "Payment Processing Fee")
+        5. AR Amount = round(AP Amount * 1.01, 2) with total adjustment for rounding errors
+        """
+        # Check if F000222 CSV file exists
+        f000222_csv_path = self.output_path / f"F000222_{self.batch_number}.csv"
+        
+        if not f000222_csv_path.exists():
+            print(f"⚠️ F000222 invoice file not found: {f000222_csv_path}")
+            print("   Skipping F000222 summary generation.")
+            return
+        
+        try:
+            # Read the F000222 CSV file with proper encoding handling
+            tried_encs = ["utf-8", "utf-8-sig", "cp1252", "latin1"]
+            df = None
+            
+            for enc in tried_encs:
+                try:
+                    df = pd.read_csv(f000222_csv_path, encoding=enc, low_memory=False)
+                    break
+                except UnicodeDecodeError:
+                    continue
+                except Exception as e:
+                    print(f"⚠️ Error reading {f000222_csv_path.name} with {enc}: {e}")
+                    continue
+            
+            if df is None:
+                print(f"❌ Could not read F000222 CSV file with any encoding")
+                return
+            
+            # Ensure required columns exist
+            required_cols = ["Invoice Number", "Charge Description", "Net Amount"]
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            
+            if missing_cols:
+                print(f"❌ Missing required columns in F000222 CSV: {missing_cols}")
+                return
+            
+            # Convert Net Amount to numeric, handling any string formatting
+            df["Net Amount"] = pd.to_numeric(df["Net Amount"].astype(str).str.replace(",", ""), errors="coerce").fillna(0)
+            
+            # Create summary by Invoice Number
+            summary_data = []
+            
+            for invoice_num in df["Invoice Number"].unique():
+                invoice_df = df[df["Invoice Number"] == invoice_num]
+                
+                # Calculate Invoice Amount 
+                invoice_amount = invoice_df["Net Amount"].sum()
+
+                # Calculate AP Amount (exclude Payment Processing Fee)
+                ap_df = invoice_df[invoice_df["Charge Description"] != "Payment Processing Fee"]
+                ap_amount = ap_df["Net Amount"].sum()
+                
+                # Calculate Processing Fee Amount
+                fee_df = invoice_df[invoice_df["Charge Description"] == "Payment Processing Fee"]
+                processing_fee = fee_df["Net Amount"].sum()
+                
+                # Calculate AR Amount (AP * 1.01, rounded)
+                ar_amount = round(ap_amount * 1.01, 2)
+                
+                summary_data.append({
+                    "Invoice Number": invoice_num,
+                    "Invoice Amount": invoice_amount,
+                    "Processing Fee Amount": processing_fee,
+                    "AP Amount": ap_amount,
+                    "AR Amount": ar_amount
+                })
+            
+            # Create summary DataFrame
+            summary_df = pd.DataFrame(summary_data)
+            
+            if summary_df.empty:
+                print("⚠️ No data found for F000222 summary")
+                return
+            
+            # Calculate totals
+            total_invoice_amount = summary_df["Invoice Amount"].sum()
+            total_ap = summary_df["AP Amount"].sum()
+            total_processing_fee = summary_df["Processing Fee Amount"].sum()
+            total_ar_target = round(total_ap * 1.01, 2)
+            current_ar_total = summary_df["AR Amount"].sum()
+            
+            # Adjust the last invoice's AR amount for rounding errors
+            if len(summary_df) > 0 and current_ar_total != total_ar_target:
+                adjustment = total_ar_target - current_ar_total
+                last_idx = summary_df.index[-1]
+                summary_df.loc[last_idx, "AR Amount"] += adjustment
+                summary_df.loc[last_idx, "AR Amount"] = round(summary_df.loc[last_idx, "AR Amount"], 2)
+                
+                if adjustment != 0 and FLAG_DEBUG:
+                    print(f"📊 Applied rounding adjustment of ${adjustment:.2f} to last invoice")
+            
+            # Add totals row
+            totals_row = pd.DataFrame({
+                "Invoice Number": ["Total"],
+                "Invoice Amount": [total_invoice_amount],
+                "Processing Fee Amount": [summary_df["Processing Fee Amount"].sum()],
+                "AP Amount": [summary_df["AP Amount"].sum()],
+                "AR Amount": [summary_df["AR Amount"].sum()]
+            })
+            
+            summary_with_totals = pd.concat([summary_df, totals_row], ignore_index=True)
+            
+            # Generate output file
+            output_file = self.output_path / f"F000222_{self.batch_number}_Summary.xlsx"
+            
+            # Create Excel file with formatting
+            with pd.ExcelWriter(output_file, engine="xlsxwriter") as writer:
+                # Write summary data
+                summary_with_totals.to_excel(writer, sheet_name="Invoice Summary", index=False)
+                
+                # Get workbook and worksheet for formatting
+                workbook = writer.book
+                worksheet = writer.sheets["Invoice Summary"]
+                
+                # Add formatting
+                money_format = workbook.add_format({'num_format': '$#,##0.00'})
+                header_format = workbook.add_format({
+                    'bold': True,
+                    'text_wrap': True,
+                    'valign': 'top',
+                    'bg_color': '#D3D3D3'
+                })
+                total_format = workbook.add_format({
+                    'bold': True,
+                    'num_format': '$#,##0.00',
+                    'bg_color': '#E6E6FA'
+                })
+                
+                # Set column widths
+                worksheet.set_column('A:A', 20)  # Invoice Number
+                worksheet.set_column('B:E', 18)  # Amount columns
+                
+                # Format header row
+                for col_num in range(len(summary_with_totals.columns)):
+                    worksheet.write(0, col_num, summary_with_totals.columns[col_num], header_format)
+                
+                # Format data rows with money format (excluding header and total row)
+                for row_num in range(1, len(summary_with_totals)):
+                    for col_num in range(1, len(summary_with_totals.columns)):  # Skip Invoice Number column
+                        cell_value = summary_with_totals.iloc[row_num-1, col_num]
+                        if row_num < len(summary_with_totals):  # Data rows
+                            worksheet.write(row_num, col_num, cell_value, money_format)
+                
+                # Format total row (last row)
+                total_row_num = len(summary_with_totals)
+                for col_num in range(1, len(summary_with_totals.columns)):  # Skip Invoice Number column
+                    cell_value = summary_with_totals.iloc[-1, col_num]
+                    worksheet.write(total_row_num, col_num, cell_value, total_format)
+            
+            print(f"✅ F000222 invoice summary generated with {len(summary_df)} invoices")
+            if FLAG_DEBUG:                
+                print(f"📁 F000222 Summary saved to: {output_file}")
+                print(f"💰 Total AP: ${total_ap:.2f}, Total AR: ${summary_df['AR Amount'].sum():.2f}")
+            
+        except Exception as e:
+            print(f"❌ Error generating F000222 summary: {e}")
+            import traceback
+            traceback.print_exc()
 
     # ----------------------
     # Combined runner
