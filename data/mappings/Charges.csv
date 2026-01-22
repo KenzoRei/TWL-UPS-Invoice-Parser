@@ -18,7 +18,7 @@ Residential,Transportation Charge,运费
 Future Day Pickup - Alternate Address - Phone Request,Pickup Fee,取件费
 Future Day Pickup - Alternate Address - Web Request,Pickup Fee,取件费
 Future Day Pickup - Web Request,Pickup Fee,取件费
-On-call Saturday Stop Charge,Pickup Fee,取件费
+Saturday On-call Stop Charge,Pickup Fee,取件费
 Residential Pickup surcharge,Pickup Fee,取件费
 3 UPS Pickup Attempts,Pickup Fee,取件费
 Returns 3 UPS Pickup Attempts,Pickup Fee,取件费
@@ -44,7 +44,7 @@ Residential Surcharge,Residential Surcharge,私人地址
 Return To Sender - Phone Request,Return To Sender Request,退件费
 Return To Sender - Web Request,Return To Sender Request,退件费
 Shipment Residential Surcharge,Residential Surcharge,私人地址
-ACC-Saturday Delivery,ACC-Saturday Delivery,周六派送手续费
+Saturday Delivery,Saturday Delivery,周六派送手续费
 Additional Handling,AHS,AHS
 Addl. Handling longest side,AHS - Len,AHS-超长
 Addl. Handling second long. Side,AHS - Wid,AHS-宽
@@ -95,3 +95,9 @@ Standard to Canada,Transportation Charge,运费
 2nd Day Air,Shipping Charge Correction,费用修正
 Shipping Correction Fee,Shipping Correction Fee,费用修正
 2nd Day Air A.M. Commercial,2nd Day Air A.M. Commercial,运费
+Surge Fee - Com,Surge Fee - Com,Surge Fee
+Reschedule Delivery - Web Request,Reschedule Delivery,指定日期派送附加费
+Next Day Air Commercial Collect,Next Day Air Commercial Collect,COD手续费
+Pickup Area Surcharge - Extended,Pickup Area Surcharge,偏远费-取件
+Surge Fee - Resi,Surge Fee - Com,Surge Fee
+Next Day Air Hundredweight Collect,Transportation Charge - HWT,运费-Hundredweight

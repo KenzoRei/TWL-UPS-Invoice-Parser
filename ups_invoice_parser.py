@@ -2448,6 +2448,7 @@ class UpsInvoiceExporter:
                     "Invoice Date": inv_date,
                     "Account Number": acct_num,
                     "cust_id": "",
+                    "TrsDt": "",
                     "Lead Shipment Number": "",
                     "Tracking Number": "",
                     "Charge_Cate_EN": getattr(ch, "charge_en", ""),
@@ -2460,6 +2461,7 @@ class UpsInvoiceExporter:
             for ship in getattr(invoice, "shipments", {}).values():
                 cust_id = getattr(ship, "cust_id", "")
                 main_trk = getattr(ship, "main_trk_num", "")
+                tran_date = getattr(ship, "tran_date", "")
 
                 # Shipment-level charges
                 for ch in getattr(ship, "shipment_charge", {}).values():
@@ -2468,6 +2470,7 @@ class UpsInvoiceExporter:
                         "Invoice Date": inv_date,
                         "Account Number": acct_num,
                         "cust_id": cust_id,
+                        "TrsDt": tran_date,
                         "Lead Shipment Number": main_trk,
                         "Tracking Number": main_trk, 
                         "Charge_Cate_EN": getattr(ch, "charge_en", ""),
@@ -2543,6 +2546,7 @@ class UpsInvoiceExporter:
                             "Invoice Date": inv_date,
                             "Account Number": acct_num,
                             "cust_id": cust_id,
+                            "TrsDt": tran_date,
                             "Lead Shipment Number": main_trk,
                             "Tracking Number": getattr(pkg, "trk_num", "") or main_trk,
                             "Charge_Cate_EN": getattr(ch, "charge_en", ""),
@@ -2618,6 +2622,48 @@ class UpsInvoiceExporter:
         self._ensure_flattened()
         self._split_costs()
         df = self.flat_charges.copy()
+
+        # Determine Type (Commercial/Residential) based on rules:
+        # 1. If Residential Surcharge exists with ap_amt > 0 -> "Residential"
+        # 2. If Charge_Cate_EN in GENERAL_ITEMCODE_MAP -> blank
+        # 3. Others -> "Commercial"
+        
+        # First, find tracking numbers with Residential Surcharge
+        residential_trackings = set(
+            df[
+                (df["Charge_Cate_EN"].isin(["Ground Residential Third Party", "Residential Surcharge"])) & 
+                (df["ap_amt"] > 0)
+            ]["Tracking Number"].unique()
+        )
+        
+        # Apply Type logic
+        def determine_type(row):
+            # Rule 2: General costs (no type)
+            if row["Charge_Cate_EN"] in self.GENERAL_ITEMCODE_MAP:
+                return ""
+            # Rule 1: Residential
+            if row["Tracking Number"] in residential_trackings:
+                return "Residential"
+            # Rule 3: Commercial
+            return "Commercial"
+        
+        df["Type"] = df.apply(determine_type, axis=1)
+
+        # Reorder columns: insert TrsDt before Lead Shipment Number, Type right after TrsDt
+        cols = df.columns.tolist()
+        # Remove TrsDt and Type from their current positions
+        if "TrsDt" in cols:
+            cols.remove("TrsDt")
+        if "Type" in cols:
+            cols.remove("Type")
+        
+        # Find position of Lead Shipment Number and insert TrsDt and Type before it
+        if "Lead Shipment Number" in cols:
+            lead_idx = cols.index("Lead Shipment Number")
+            cols.insert(lead_idx, "TrsDt")
+            cols.insert(lead_idx + 1, "Type")
+        
+        df = df[cols]
 
         summary_invoice = df.groupby("Invoice Number")[["ap_amt"]].sum().reset_index()
         summary_customer = df.groupby("cust_id")[["ap_amt", "ar_amt"]].sum().reset_index()
