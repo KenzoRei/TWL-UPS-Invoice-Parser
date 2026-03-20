@@ -1995,6 +1995,14 @@ class UpsCustomerMatcher:
         # Apply override where condition is met
         self.df.loc[cond_special_zero, "AR_Amount"] = 0.00
 
+        # Customer-specific override for F000302:
+        # - Any pickup-related charge gets fixed AR amount = 20
+        # - Fuel Surcharge gets fixed AR amount = 0
+        cond_f000302 = self.df["cust_id"].astype(str).str.strip().eq("F000302")
+        cate_en = self.df["Charge_Cate_EN"].astype(str).str.strip()
+        self.df.loc[cond_f000302 & cate_en.str.lower().str.contains("pickup", regex=False), "AR_Amount"] = 20.00
+        self.df.loc[cond_f000302 & cate_en.eq("Fuel Surcharge"), "AR_Amount"] = 0.00
+
     def get_matched_data(self) -> pd.DataFrame:
         """Return the updated DataFrame with customer info matched."""
         return self.df    
