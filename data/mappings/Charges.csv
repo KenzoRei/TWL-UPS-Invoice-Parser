@@ -101,3 +101,9 @@ Next Day Air Commercial Collect,Next Day Air Commercial Collect,COD手续费
 Pickup Area Surcharge - Extended,Pickup Area Surcharge,偏远费-取件
 Surge Fee - Resi,Surge Fee - Com,Surge Fee
 Next Day Air Hundredweight Collect,Transportation Charge - HWT,运费-Hundredweight
+2nd Day Air Undeliverable Return,Transportation Charge - Return,运费-退件费
+Large Package Surcharge Resi - Weight,Large Package Surcharge Resi - Weight,超大件-重量
+Large Package Surcharge Comm - Weight,Large Package Surcharge Comm - Weight,超大件-重量
+Large Package Surcharge Comm - Cubic Volume,Large Package Surcharge Comm - Cubic Volume,超大件-体积
+Shipping Charge Correction Large Package Surcharge Resi - Cubic Volume,Shipping Charge Correction Large Package Surcharge Resi - Cubic Volume,费用修正-超大件体积
+Additional Handling - Cubic Volume,Additional Handling - Cubic Volume,AHS-体积

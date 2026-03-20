@@ -1662,7 +1662,11 @@ class UpsCustomerMatcher:
 
             if self.use_api:
                 # Enhanced tracking-based matching workflow
+                # Mirror _collect_trk_ref: prefer Tracking Number, fall back to
+                # Lead Shipment Number when blank (cache is keyed the same way)
                 trk_num = str(row.get("Tracking Number", "") or "").strip()
+                if is_blank(trk_num):
+                    trk_num = str(row.get("Lead Shipment Number", "") or "").strip()
                 
                 # Priority: if this is a pickup charge, prefer the Pickups.csv mapping for the account
                 # This prevents the YDD API/cache from overriding the intended pickup-account mapping
