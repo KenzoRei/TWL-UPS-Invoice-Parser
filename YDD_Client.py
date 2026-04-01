@@ -1,6 +1,7 @@
 # ydd_client.py
 from __future__ import annotations
 import os, time, logging
+from datetime import datetime
 from typing import Iterable, Dict, Tuple, List
 import requests
 
@@ -8,6 +9,70 @@ YDD_BASE = os.getenv("YDD_BASE", "http://twc.itdida.com/itdida-api")
 YDD_USER = os.getenv("YDD_USER", "5055457@qq.com")
 YDD_PASS = os.getenv("YDD_PASS", "Twc11434!")
 YDD_TIMEOUT = float(os.getenv("YDD_TIMEOUT", "20"))
+YDD_ERROR_LOG = os.getenv("YDD_ERROR_LOG", os.path.join("output", "ydd_http_errors.log"))
+
+
+class YDDApiHTTPError(RuntimeError):
+    """Raised when YDD API returns a non-2xx response with rich diagnostics."""
+
+
+def _safe_text(response: requests.Response) -> str:
+    """Safely get response text for debugging even if decoding fails."""
+    try:
+        return response.text
+    except Exception:
+        try:
+            return response.content.decode("utf-8", errors="replace")
+        except Exception:
+            return "<unable to decode response body>"
+
+
+def _persist_http_error(context: str, response: requests.Response) -> str:
+    """Persist full HTTP error details to a local log file for postmortem debugging."""
+    ts = datetime.now().isoformat(timespec="seconds")
+    body = _safe_text(response)
+    request = response.request
+    req_headers = dict(request.headers) if request else {}
+    res_headers = dict(response.headers)
+
+    # Avoid leaking long bearer tokens into logs while keeping auth scheme info.
+    if "Authorization" in req_headers:
+        auth_val = str(req_headers["Authorization"])
+        req_headers["Authorization"] = auth_val.split(" ")[0] + " <redacted>"
+
+    payload = [
+        "=" * 80,
+        f"timestamp: {ts}",
+        f"context: {context}",
+        f"status: {response.status_code}",
+        f"reason: {response.reason}",
+        f"url: {response.url}",
+        f"request_method: {request.method if request else '<unknown>'}",
+        f"request_headers: {req_headers}",
+        f"response_headers: {res_headers}",
+        "response_body_start",
+        body,
+        "response_body_end",
+        "",
+    ]
+
+    log_path = os.path.abspath(YDD_ERROR_LOG)
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write("\n".join(payload))
+
+    return log_path
+
+
+def _raise_http_error(context: str, response: requests.Response) -> None:
+    """Raise a rich exception and persist full response details for server-side failures."""
+    log_path = _persist_http_error(context, response)
+    body = _safe_text(response)
+    raise YDDApiHTTPError(
+        f"[{context}] HTTP {response.status_code} {response.reason} for {response.url}\n"
+        f"Response body:\n{body}\n"
+        f"Full diagnostics appended to: {log_path}"
+    )
 
 class YDDClient:
     def __init__(self, base: str | None = None, *, username: str | None = None, password: str | None = None):
@@ -28,7 +93,10 @@ class YDDClient:
         }
         # form-encoded -> requests uses application/x-www-form-urlencoded for data=
         r = self.session.post(url, data=payload, timeout=YDD_TIMEOUT)
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except requests.HTTPError:
+            _raise_http_error("login", r)
         js = r.json()
         if not js.get("success", False):
             raise RuntimeError(f"Login failed: {js}")
@@ -49,7 +117,10 @@ class YDDClient:
             logging.info("YDD 401 received; re-authenticating…")
             self.login()
             return self._get(path, params=params, retry=False)
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except requests.HTTPError:
+            _raise_http_error(f"GET {path}", r)
         return r.json()
 
     # ---- business: query shiment info by order number(10 pkgs/batch) ----
