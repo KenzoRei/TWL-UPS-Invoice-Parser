@@ -603,7 +603,7 @@ class UpsCustomerMatcher:
         use_api: bool = FLAG_API_USE,
         ydd_threads: int = 1,         # 1 = sequential; >1 enables parallel
         ydd_batch_size: int = 9,      # API limit is 10
-        ydd_interval: float = 0.1,    # seconds between YDD sequential requests
+        ydd_interval: float = 2.0,    # minimum seconds between YDD sequential requests
         ydd_client: Optional[object] = None,
         use_cache: bool = True,       # optional on-disk cache for API mapping
     ):
@@ -613,7 +613,7 @@ class UpsCustomerMatcher:
         :param use_api:       True -> fetch mapping via YDD API; False -> use manual Excel mapping
         :param ydd_threads:   Parallel threads for YDD API (1 = sequential)
         :param ydd_batch_size:Max refs per request (YDD docs say 10)
-        :param ydd_interval:  Delay in seconds between sequential YDD requests
+        :param ydd_interval:  Delay in seconds between sequential YDD requests (minimum 2.0)
         :param ydd_client:    Optional preconfigured YDDClient; if None, env vars are used
         :param use_cache:     If True, cache danHao→(cust_id,tracking) to output/ydd_ref_map.csv
         """
@@ -629,7 +629,7 @@ class UpsCustomerMatcher:
         self.use_api = use_api
         self.ydd_threads = max(1, int(ydd_threads))
         self.ydd_batch_size = max(1, int(ydd_batch_size))
-        self.ydd_interval = max(0.0, float(ydd_interval))
+        self.ydd_interval = max(2.0, float(ydd_interval))
         self._ydd_client = ydd_client
         self.use_cache = use_cache
 

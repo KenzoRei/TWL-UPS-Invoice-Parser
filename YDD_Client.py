@@ -10,6 +10,7 @@ YDD_USER = os.getenv("YDD_USER", "5055457@qq.com")
 YDD_PASS = os.getenv("YDD_PASS", "Twc11434!")
 YDD_TIMEOUT = float(os.getenv("YDD_TIMEOUT", "20"))
 YDD_ERROR_LOG = os.getenv("YDD_ERROR_LOG", os.path.join("output", "ydd_http_errors.log"))
+YDD_MIN_INTERVAL = float(os.getenv("YDD_MIN_INTERVAL", "2"))
 
 
 class YDDApiHTTPError(RuntimeError):
@@ -124,13 +125,14 @@ class YDDClient:
         return r.json()
 
     # ---- business: query shiment info by order number(10 pkgs/batch) ----
-    def query_yundan_detail(self, danhaos: Iterable[str], *, batch_size: int = 10, sleep: float = 0.05) -> List[dict]:
+    def query_yundan_detail(self, danhaos: Iterable[str], *, batch_size: int = 10, sleep: float = YDD_MIN_INTERVAL) -> List[dict]:
         """Returns concatenated 'data' arrays across batches."""
         # Ensure we’re authenticated
         if not self.token:
             self.login()
 
         clean = [str(x).strip() for x in danhaos if str(x).strip()]
+        sleep = max(YDD_MIN_INTERVAL, float(sleep))
         out: List[dict] = []
         for i in range(0, len(clean), batch_size):
             chunk = clean[i:i+batch_size]
@@ -149,13 +151,14 @@ class YDDClient:
 
     # ---- business: query package info by tracking number(10 pkgs/batch) ----
     # Inputs can be Reference Number or Lead Shipment Number
-    def query_piece_detail(self, danhaos: Iterable[str], *, batch_size: int = 10, sleep: float = 0.05) -> List[dict]:
+    def query_piece_detail(self, danhaos: Iterable[str], *, batch_size: int = 10, sleep: float = YDD_MIN_INTERVAL) -> List[dict]:
         """Returns concatenated 'data' arrays across batches."""
         # Ensure we’re authenticated
         if not self.token:
             self.login()
 
         clean = [str(x).strip() for x in danhaos if str(x).strip()]
+        sleep = max(YDD_MIN_INTERVAL, float(sleep))
         out: List[dict] = []
         for i in range(0, len(clean), batch_size):
             chunk = clean[i:i+batch_size]
@@ -209,3 +212,5 @@ def build_trk_to_cust(items: List[dict]) -> Dict[str, Tuple[str, str]]:
         if trk and cust:
             m[trk] = (cust, transfer or trk)
     return m
+
+
