@@ -1371,6 +1371,49 @@ class UpsCustomerMatcher:
             if ref in ref_to_cust:
                 trk_to_cust[trk] = ref_to_cust[ref]
 
+        # Step 4 (fallback): for unresolved trackings, query yundan_detail directly
+        # using tracking values. This handles cases where keHuDanHao contains commas
+        # and is split server-side during danHao parsing.
+        unresolved = [trk for trk in trk_to_ref if trk not in trk_to_cust]
+        if unresolved:
+            try:
+                client = self._ensure_ydd_client()
+                direct_items = self._call_ydd_api_with_retry(
+                    client.query_yundan_detail,
+                    unresolved,
+                    batch_size=min(self.ydd_batch_size, 10),
+                    sleep=self.ydd_interval,
+                )
+                from YDD_Client import build_trk_to_cust
+                direct_trk_to_cust = build_trk_to_cust(direct_items)
+
+                for trk in unresolved:
+                    if trk in direct_trk_to_cust:
+                        trk_to_cust[trk] = direct_trk_to_cust[trk]
+
+                # Some YDD responses fail when multiple danHaos are sent together.
+                # To control latency, retry one-by-one only for unresolved trackings
+                # whose intermediate reference contains a comma.
+                still_unresolved = [trk for trk in unresolved if trk not in trk_to_cust]
+                comma_ref_unresolved = [
+                    trk for trk in still_unresolved
+                    if "," in str(trk_to_ref.get(trk, "") or "")
+                ]
+                if comma_ref_unresolved:
+                    for trk in comma_ref_unresolved:
+                        single_items = self._call_ydd_api_with_retry(
+                            client.query_yundan_detail,
+                            [trk],
+                            batch_size=1,
+                            sleep=self.ydd_interval,
+                        )
+                        single_map = build_trk_to_cust(single_items)
+                        if trk in single_map:
+                            trk_to_cust[trk] = single_map[trk]
+            except Exception as e:
+                if FLAG_DEBUG:
+                    print(f"[Debug] Direct yundan fallback failed: {e}")
+
         if FLAG_DEBUG:
             print(f"[Debug] Two-step matching: {len(trk_to_cust)} final tracking->cust mappings")
 

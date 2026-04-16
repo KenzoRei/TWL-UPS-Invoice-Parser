@@ -3,6 +3,7 @@ from __future__ import annotations
 import os, time, logging
 from datetime import datetime
 from typing import Iterable, Dict, Tuple, List
+from urllib.parse import quote
 import requests
 
 YDD_BASE = os.getenv("YDD_BASE", "http://twc.itdida.com/itdida-api")
@@ -110,14 +111,18 @@ class YDDClient:
         return token
 
     # ---- helper: GET with auto 401 relogin ----
-    def _get(self, path: str, *, params: dict | None = None, retry: bool = True):
+    def _get(self, path: str, *, params: dict | None = None, pre_encoded_query: str | None = None, retry: bool = True):
         url = f"{self.base}{path if path.startswith('/') else '/'+path}"
-        r = self.session.get(url, params=params or {}, timeout=YDD_TIMEOUT)
+        if pre_encoded_query:
+            url = f"{url}?{pre_encoded_query}"
+            r = self.session.get(url, timeout=YDD_TIMEOUT)
+        else:
+            r = self.session.get(url, params=params or {}, timeout=YDD_TIMEOUT)
         if r.status_code == 401 and retry:
             # token expired → relogin once and retry
             logging.info("YDD 401 received; re-authenticating…")
             self.login()
-            return self._get(path, params=params, retry=False)
+            return self._get(path, params=params, pre_encoded_query=pre_encoded_query, retry=False)
         try:
             r.raise_for_status()
         except requests.HTTPError:
@@ -136,9 +141,10 @@ class YDDClient:
         out: List[dict] = []
         for i in range(0, len(clean), batch_size):
             chunk = clean[i:i+batch_size]
-            # URL encode commas in individual references to prevent API misinterpretation
-            encoded_chunk = [ref.replace(",", "%2C") for ref in chunk]
-            js = self._get("/queryYunDanDetail", params={"danHaos": ",".join(encoded_chunk)})
+            # Encode each reference once and compose the final query string manually.
+            # This prevents requests from turning "%2C" into "%252C".
+            encoded_chunk = [quote(ref, safe="") for ref in chunk]
+            js = self._get("/queryYunDanDetail", pre_encoded_query=f"danHaos={','.join(encoded_chunk)}")
             if not js.get("success", False):
                 logging.warning(f"[YDD Danhao]YDD success=false for {chunk}: {js}")
             data = js.get("data") or []
@@ -162,9 +168,10 @@ class YDDClient:
         out: List[dict] = []
         for i in range(0, len(clean), batch_size):
             chunk = clean[i:i+batch_size]
-            # URL encode commas in individual references to prevent API misinterpretation
-            encoded_chunk = [ref.replace(",", "%2C") for ref in chunk]
-            js = self._get("/queryPieceDetail", params={"danHaos": ",".join(encoded_chunk)})
+            # Encode each reference once and compose the final query string manually.
+            # This prevents requests from turning "%2C" into "%252C".
+            encoded_chunk = [quote(ref, safe="") for ref in chunk]
+            js = self._get("/queryPieceDetail", pre_encoded_query=f"danHaos={','.join(encoded_chunk)}")
             if not js.get("success", False):
                 logging.warning(f"[YDD Trk]YDD success=false for {chunk}: {js}")
             data = js.get("data") or []
